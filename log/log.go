@@ -7,9 +7,9 @@ import (
 )
 
 var (
-	logCh = make(chan Event)
-	_     = NewObservable[Event](logCh)
-	level = INFO
+	logCh      = make(chan Event, 1000)
+	observable = NewObservable[Event](logCh)
+	level      = INFO
 )
 
 func init() {
@@ -17,7 +17,7 @@ func init() {
 	log.SetLevel(log.DebugLevel)
 	log.SetFormatter(&log.TextFormatter{
 		FullTimestamp:             true,
-		TimestampFormat:           "2006-01-02T15:04:05.999999999Z07:00",
+		TimestampFormat:           "15:04:05",
 		EnvironmentOverrideColors: true,
 	})
 }
@@ -31,27 +31,44 @@ func (e *Event) Type() string {
 	return e.LogLevel.String()
 }
 
+// Subscribe 允许 GUI 和外部组件动态接收并显示日志
+func Subscribe() (Subscription[Event], error) {
+	return observable.Subscribe()
+}
+
 func Infoln(format string, v ...any) {
 	event := newLog(INFO, format, v...)
-	logCh <- event
+	select {
+	case logCh <- event:
+	default:
+	}
 	print(event)
 }
 
 func Warnln(format string, v ...any) {
 	event := newLog(WARNING, format, v...)
-	logCh <- event
+	select {
+	case logCh <- event:
+	default:
+	}
 	print(event)
 }
 
 func Errorln(format string, v ...any) {
 	event := newLog(ERROR, format, v...)
-	logCh <- event
+	select {
+	case logCh <- event:
+	default:
+	}
 	print(event)
 }
 
 func Debugln(format string, v ...any) {
 	event := newLog(DEBUG, format, v...)
-	logCh <- event
+	select {
+	case logCh <- event:
+	default:
+	}
 	print(event)
 }
 
