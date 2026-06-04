@@ -1,75 +1,114 @@
 package client
 
 import (
-	"os/exec"
-	"runtime"
-
-	tunToArgo "github.com/fmnx/cftun/client/tun/engine"
-	"github.com/fmnx/cftun/client/tun/proxy"
-	"github.com/fmnx/cftun/client/tun/route"
-	"github.com/fmnx/cftun/client/tun/transport/argo"
 	"github.com/fmnx/cftun/log"
+	"net"
+	"sync"
 )
 
-type Tun struct {
-	Enable    bool     `yaml:"enable" json:"enable"`
-	Name      string   `yaml:"name" json:"name"`
-	Interface string   `yaml:"interface" json:"interface"`
-	LogLevel  string   `yaml:"log-level" json:"log-level"`
-	Routes    []string `yaml:"routes" json:"routes"`
-	ExRoutes  []string `yaml:"ex-routes" json:"ex-routes"`
-	Ipv4      string   `yaml:"ipv4" json:"ipv4"`
-	Ipv6      string   `yaml:"ipv6" json:"ipv6"`
-	MTU       int      `yaml:"mtu" json:"mtu"`
+const defaultBufferSize = 16 * 4096
+
+var bufferPool = sync.Pool{
+	New: func() any {
+		return make([]byte, defaultBufferSize)
+	},
 }
 
-func (t *Tun) ipv4() string {
-	if t.Ipv4 != "" {
-		return t.Ipv4
-	}
-	switch runtime.GOOS {
-	case "windows":
-		return "192.168.123.1"
-	case "darwin":
-		return "192.168.123.1"
-	default:
-		return "198.18.0.1"
-	}
+type TcpConnector struct {
+	ws     *Websocket
+	wsConn net.Conn
+	conn   net.Conn
+	closed bool
+	mu     sync.Mutex
 }
 
-func (t *Tun) ipv6() string {
-	if t.Ipv6 != "" {
-		return t.Ipv6
-	}
-	return "fd12:3456:789a::1"
-}
-
-func (t *Tun) mtu() int {
-	if t.MTU == 0 {
-		// V1：针对公网 UDP 的审查和瓶颈，默认采用 1300 字节，防止分片重传
-		return 1300
-	}
-	return t.MTU
-}
-
-func (t *Tun) Run(params *argo.Params) {
-	// V2: 初始化并注入 FastPath（端口路由直连层，绕过 gVisor 开销）
-	log.Infoln("[FastPath] Initializing bypass layer for RDP (3389) | TeamViewer (5938) | AnyDesk (7070)...")
-	argoProxy := proxy.NewArgo(params)
-
-	err := tunToArgo.HandleNetStack(argoProxy, t.Name, t.Interface, t.LogLevel, t.mtu())
+func handleTcp(ws *Websocket, conn net.Conn) {
+	wsConn, err := ws.createWebsocketStream()
 	if err != nil {
-		log.Fatalln(err.Error())
-	}
-
-	route.ConfigureTun(t.Name, t.ipv4(), t.ipv6(), t.Routes, t.ExRoutes)
-}
-
-func DeleteTunDevice(tunName string) {
-	tunToArgo.Stop()
-	if runtime.GOOS != "linux" {
+		_ = conn.Close()
 		return
 	}
-	_ = exec.Command("ip", "link", "set", tunName, "down").Run()
-	_ = exec.Command("ip", "tuntap", "del", tunName, "mode", "tun").Run()
+	tcpConnector := &TcpConnector{
+		ws:     ws,
+		wsConn: wsConn,
+		conn:   conn,
+		closed: false,
+	}
+	tcpConnector.handle()
+}
+
+func (t *TcpConnector) handle() {
+	go t.handleDownstream()
+	go t.handleUpstream()
+}
+
+func (t *TcpConnector) Close() {
+	t.closed = true
+}
+
+func (t *TcpConnector) safeWrite(b []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.wsConn.Write(b)
+}
+
+func (t *TcpConnector) handleUpstream() {
+	buf := bufferPool.Get().([]byte)
+	defer t.wsConn.Close()
+	defer t.Close()
+	defer bufferPool.Put(buf)
+	for !t.closed {
+		nr, err := t.conn.Read(buf)
+		if err != nil {
+			break
+		}
+		nw, ew := t.safeWrite(buf[:nr])
+		if ew != nil || nw != nr {
+			break
+		}
+	}
+	return
+}
+
+func (t *TcpConnector) handleDownstream() {
+	buf := bufferPool.Get().([]byte)
+	defer t.conn.Close()
+	defer t.Close()
+	defer bufferPool.Put(buf)
+	for !t.closed {
+		nr, err := t.wsConn.Read(buf)
+		if err != nil {
+			break
+		}
+		nw, ew := t.conn.Write(buf[:nr])
+		if ew != nil || nw != nr {
+			break
+		}
+	}
+}
+
+func TcpListen(config *Config, tunnel *Tunnel) {
+	tcpListener, err := net.Listen("tcp", tunnel.Listen)
+	if err != nil {
+		log.Errorln("TCP listen error: %s", err.Error())
+		return
+	}
+	defer tcpListener.Close()
+	log.Infoln("TCP listen on %s", tunnel.Listen)
+
+	errChan := make(chan error)
+	ws := NewWebsocket(config, tunnel)
+
+	for {
+		conn, err := tcpListener.Accept()
+		if err != nil {
+			select {
+			case errChan <- err:
+			default:
+			}
+			log.Errorln(err.Error())
+			return
+		}
+		go handleTcp(ws, conn)
+	}
 }
