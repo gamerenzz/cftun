@@ -3,9 +3,6 @@ package argo
 import (
 	"errors"
 	"fmt"
-	"github.com/fmnx/cftun/client/tun/dialer"
-	"github.com/fmnx/cftun/client/tun/metadata"
-	"github.com/gorilla/websocket"
 	"net"
 	"net/http"
 	"strconv"
@@ -13,6 +10,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/fmnx/cftun/client/tun/dialer"
+	"github.com/fmnx/cftun/client/tun/metadata"
+	"github.com/gorilla/websocket"
 )
 
 type Params struct {
@@ -34,20 +35,22 @@ type Websocket struct {
 	connCount *atomic.Int32
 	stopChan  chan struct{}
 	connPool  chan net.Conn
+
+	// V2：增加多流相互独立的高速控制专线，防止队头阻塞
+	interactivePool chan net.Conn
 }
 
 func NewWebsocket(params *Params) *Websocket {
-
 	hostPath := strings.Split(params.Url, "/")
 	host := hostPath[0]
 
 	wsDialer := &websocket.Dialer{
 		TLSClientConfig:   nil,
 		Proxy:             http.ProxyFromEnvironment,
-		HandshakeTimeout:  time.Second,
+		HandshakeTimeout:  3 * time.Second,
 		ReadBufferSize:    32 << 10,
 		WriteBufferSize:   32 << 10,
-		EnableCompression: true,
+		EnableCompression: false, // 远程桌面自带高度压缩，二次压缩反而加重开销
 	}
 
 	address := net.JoinHostPort(params.CdnIP, strconv.Itoa(params.Port))
@@ -63,15 +66,15 @@ func NewWebsocket(params *Params) *Websocket {
 	headers.Set("User-Agent", "DEV")
 
 	ws := &Websocket{
-		params:   params,
-		wsDialer: wsDialer,
-		headers:  headers,
-		Address:  address,
-		Url:      fmt.Sprintf("%s://%s", params.Scheme, host),
-
-		connCount: &atomic.Int32{},
-		stopChan:  make(chan struct{}),
-		connPool:  make(chan net.Conn, params.PoolSize),
+		params:          params,
+		wsDialer:        wsDialer,
+		headers:         headers,
+		Address:         address,
+		Url:             fmt.Sprintf("%s://%s", params.Scheme, host),
+		connCount:       &atomic.Int32{},
+		stopChan:        make(chan struct{}),
+		connPool:        make(chan net.Conn, params.PoolSize),
+		interactivePool: make(chan net.Conn, 4), // 建立4个预备交互专线
 	}
 	return ws
 }
@@ -79,6 +82,9 @@ func NewWebsocket(params *Params) *Websocket {
 func (w *Websocket) Close() {
 	close(w.stopChan)
 	for conn := range w.connPool {
+		_ = conn.Close()
+	}
+	for conn := range w.interactivePool {
 		_ = conn.Close()
 	}
 }
@@ -130,11 +136,26 @@ func (w *Websocket) connect(metadata *metadata.Metadata) (net.Conn, error) {
 		return nil, err
 	}
 
-	return &GorillaConn{Conn: wsConn}, nil
+	// 针对交互专线及常规传输流统一包装，利用 QoS 自动分包器分配优先级
+	return dialer.NewQoSConn(&GorillaConn{Conn: wsConn}), nil
 }
 
 func (w *Websocket) Dial(metadata *metadata.Metadata) (conn net.Conn, headerSent bool, err error) {
 	defer func() { go w.preDial() }()
+
+	// V2：对于交互控制小包流（UDP信令或特定端口），调度到独立的交互专用连接上发送，免受屏幕刷新等大包排队影响
+	if metadata != nil && (metadata.Network.String() == "udp" || metadata.DstPort == 5938 || metadata.DstPort == 3389) {
+		select {
+		case conn = <-w.interactivePool:
+			return conn, false, nil
+		default:
+			// 如果缓存专线不够，现场开辟控制专线以确保低延迟
+			conn, err = w.connect(metadata)
+			headerSent = true
+			return conn, headerSent, err
+		}
+	}
+
 	select {
 	case <-w.stopChan:
 		err = errors.New("websocket has been closed")
