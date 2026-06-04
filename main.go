@@ -75,7 +75,6 @@ func init() {
 }
 
 func runCoreEngine() {
-	bInfo := server.GetBuildInfo(BuildType, CloudflaredVersion)
 	rawConfig, err := parseConfig(configFile)
 	if err != nil {
 		log.Errorln("Failed to parse config file: %s", err.Error())
@@ -101,25 +100,55 @@ func runCoreEngine() {
 		if s.Token == "quick" {
 			isQuick = true
 		}
-		go s.Run(bInfo, quickData)
+		// 将 GetBuildInfo 内联传参，不声明局部变量
+		go s.Run(server.GetBuildInfo(BuildType, CloudflaredVersion), quickData)
 	}
 }
 
+func printVersion() {
+	bInfo := server.GetBuildInfo(BuildType, CloudflaredVersion)
+	fmt.Printf("GoOS: %s\nGoArch: %s\nGoVersion: %s\nBuildType: %s\nCftunVersion: %s\nBuildDate: %s\n",
+		bInfo.GoOS, bInfo.GoArch, bInfo.GoVersion, bInfo.BuildType, Version, BuildDate)
+}
+
 func main() {
-	// Windows 平台，如果没有传入 CLI 命令，则自动切换至 Native 专属图形界面
+	if showVersion {
+		printVersion()
+		return
+	}
+
+	// 判断 Windows 环境下是否直接双击启动 (没有任何命令行参数)
 	if runtime.GOOS == "windows" && configFile == "" && token == "" && !isQuick {
-		log.Infoln("[System] Double-click detected. Redirecting to Graphical Panel...")
+		log.Infoln("[System] Double-click detected. Launching Windows Panel...")
 		client.StartWindowsGUI(runCoreEngine)
 		return
 	}
 
-	if showVersion {
-		bInfo := server.GetBuildInfo(BuildType, CloudflaredVersion)
-		fmt.Printf("CFTunVersion: %s\nBuildDate: %s\n", Version, BuildDate)
-		return
+	// 命令行带参数启动逻辑
+	if token != "" || isQuick {
+		var warp *server.Warp
+		if proxy4 || proxy6 {
+			warp = &server.Warp{
+				Auto:   true,
+				Port:   uint16(port),
+				Proxy4: proxy4,
+				Proxy6: proxy6,
+			}
+		}
+		if isQuick {
+			token = "quick"
+		} else if token == "quick" {
+			isQuick = true
+		}
+		srv := &server.Config{
+			Token:  token,
+			HaConn: 4,
+			Warp:   warp,
+		}
+		go srv.Run(server.GetBuildInfo(BuildType, CloudflaredVersion), quickData)
+	} else {
+		runCoreEngine()
 	}
-
-	runCoreEngine()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -129,4 +158,3 @@ func main() {
 		client.DeleteTunDevice(tunName)
 	}
 }
-
