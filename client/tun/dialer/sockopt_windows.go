@@ -1,10 +1,8 @@
 package dialer
 
 import (
-	"encoding/binary"
 	"net"
 	"syscall"
-	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -53,11 +51,9 @@ func setSocketOptions(network, address string, c syscall.RawConn, opts *Options)
 }
 
 func bindSocketToInterface4(handle windows.Handle, index uint32) error {
-	// 补全参数：fd, level, optname, value 三个整型传入
 	return windows.SetsockoptInt(handle, windows.IPPROTO_IP, IP_UNICAST_IF, int(index))
 }
 
 func bindSocketToInterface6(handle windows.Handle, index uint32) error {
-	// 补全参数：fd, level, optname, value 三个整型传入，并修正本地常量引用
 	return windows.SetsockoptInt(handle, windows.IPPROTO_IPV6, IPV6_UNICAST_IF, int(index))
 }
