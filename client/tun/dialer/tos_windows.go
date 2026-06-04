@@ -1,3 +1,6 @@
+//go:build windows
+// +build windows
+
 package dialer
 
 import (
@@ -30,3 +33,4 @@ func SetSocketTOS(conn net.Conn, tos int) {
 		_ = windows.SetsockoptInt(windows.Handle(fd), windows.IPPROTO_IP, IP_TOS, tos)
 	})
 }
+
