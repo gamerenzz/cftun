@@ -53,12 +53,11 @@ func setSocketOptions(network, address string, c syscall.RawConn, opts *Options)
 }
 
 func bindSocketToInterface4(handle windows.Handle, index uint32) error {
-	var bytes [4]byte
-	binary.BigEndian.PutUint32(bytes[:], index)
-	index = *(*uint32)(unsafe.Pointer(&bytes[0]))
+	// 补全参数：fd, level, optname, value 三个整型传入
 	return windows.SetsockoptInt(handle, windows.IPPROTO_IP, IP_UNICAST_IF, int(index))
 }
 
 func bindSocketToInterface6(handle windows.Handle, index uint32) error {
-	return windows.SetsockoptInt(handle, windows.IPV6_UNICAST_IF, int(index))
+	// 补全参数：fd, level, optname, value 三个整型传入，并修正本地常量引用
+	return windows.SetsockoptInt(handle, windows.IPPROTO_IPV6, IPV6_UNICAST_IF, int(index))
 }
