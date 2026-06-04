@@ -3,10 +3,11 @@
 set -e  # 发生错误时退出
 
 APP_NAME="cftun"
-VERSION="2.1.4"
+VERSION="2.3.0"
 BUILD_TYPE="release"
 BUILD_DIR="build"
-PLATFORMS=("linux/amd64" "linux/arm64" "linux/arm" "windows/amd64" "windows/arm64" "darwin/amd64" "darwin/arm64" "freebsd/amd64")
+# 仅保留 windows/amd64 编译通道，极致压缩测试期间的等待时间
+PLATFORMS=("windows/amd64")
 
 # 创建 build 目录
 mkdir -p $BUILD_DIR
@@ -21,7 +22,7 @@ for PLATFORM in "${PLATFORMS[@]}"; do
         OUTPUT_NAME+=".exe"
     fi
 
-    echo "Building for $OS/$ARCH..."
+    echo "Building only for $OS/$ARCH (Test Stage)..."
     LDFLAGS="-X main.Version=$VERSION -X main.BuildDate=$(date '+%Y-%m-%d_%H:%M:%S_%Z') -X main.BuildType=$BUILD_TYPE"
 
     env CGO_ENABLED=0 GOOS=$OS GOARCH=$ARCH go build -ldflags "$LDFLAGS" -o $BUILD_DIR/$OUTPUT_NAME
@@ -34,4 +35,4 @@ for PLATFORM in "${PLATFORMS[@]}"; do
     fi
 done
 
-echo "Build completed! Files are in the '$BUILD_DIR' directory."
+echo "Build completed! Windows binary is in the '$BUILD_DIR' directory."
