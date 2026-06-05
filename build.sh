@@ -6,7 +6,6 @@ APP_NAME="cftun"
 VERSION="2.3.0"
 BUILD_TYPE="release"
 BUILD_DIR="build"
-# 仅保留 windows/amd64 编译通道，极致压缩测试期间的等待时间
 PLATFORMS=("windows/amd64")
 
 # 创建 build 目录
@@ -22,12 +21,13 @@ for PLATFORM in "${PLATFORMS[@]}"; do
         OUTPUT_NAME+=".exe"
     fi
 
-    echo "Building only for $OS/$ARCH (Test Stage)..."
-    LDFLAGS="-X main.Version=$VERSION -X main.BuildDate=$(date '+%Y-%m-%d_%H:%M:%S_%Z') -X main.BuildType=$BUILD_TYPE"
+    echo "Building only for $OS/$ARCH (Hiding Console Window)..."
+    # -H windowsgui 标志：在 Windows 下运行不弹出黑色命令行窗口，直接进入纯 GUI 进程
+    LDFLAGS="-H windowsgui -X main.Version=$VERSION -X main.BuildDate=$(date '+%Y-%m-%d_%H:%M:%S_%Z') -X main.BuildType=$BUILD_TYPE"
 
     env CGO_ENABLED=0 GOOS=$OS GOARCH=$ARCH go build -ldflags "$LDFLAGS" -o $BUILD_DIR/$OUTPUT_NAME
 
-    # 压缩文件
+    # 压缩打包
     if [ "$OS" == "windows" ]; then
         zip -j "$BUILD_DIR/$APP_NAME-$OS-$ARCH.zip" "$BUILD_DIR/$OUTPUT_NAME"
     else
