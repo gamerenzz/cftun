@@ -17,9 +17,6 @@ const (
 	defaultOutQueueLen = 1 << 10
 )
 
-// FastPathHook 允许上层引擎挂载无状态过滤，直接把数据包截获并转发，彻底绕过 gVisor 协议栈
-var FastPathHook func(packet []byte) bool
-
 type Endpoint struct {
 	*channel.Endpoint
 
@@ -86,14 +83,6 @@ func (e *Endpoint) dispatchLoop(cancel context.CancelFunc) {
 
 		if n == 0 || n > mtu {
 			continue
-		}
-
-		// 真·FastPath：一旦挂载了过滤处理器，且判定该 IP 报文属于 RDP/TeamViewer (3389/5938)
-		// 阻断其进入 gVisor Inbound 队列，直接通过 FastPath 直连层在零内存拷贝状态下送出物理网卡
-		if FastPathHook != nil {
-			if FastPathHook(data[offset : offset+n]) {
-				continue // 成功旁路直连，无需送入 gVisor 协议栈！
-			}
 		}
 
 		if !e.IsAttached() {
