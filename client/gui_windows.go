@@ -179,7 +179,6 @@ func CopyToClipboard(text string) {
 	user32.NewProc("CloseClipboard").Call()
 }
 
-// OpenExeFileDialog Windows 原生无 CGO 级别文件选择对话框
 func OpenExeFileDialog(hWnd syscall.Handle) string {
 	comdlg32 := syscall.NewLazyDLL("comdlg32.dll")
 	procGetOpenFileName := comdlg32.NewProc("GetOpenFileNameW")
@@ -245,13 +244,13 @@ func writeClientConfig(targetDomain string) {
 	_ = os.WriteFile("config.json", data, 0644)
 }
 
-// 联动外部软件启动 (最小化静默模式)
+// 联动外部软件启动 (完全静默后台模式，完美避开干扰)
 func startAssociatedApp() {
 	if associatedExePath != "" && associatedCmd == nil {
-		log.Infoln("[System] Launching associated app (Minimized): %s", associatedExePath)
+		log.Infoln("[System] Launching associated app (Silent Background): %s", associatedExePath)
 		associatedCmd = exec.Command(associatedExePath)
 		associatedCmd.SysProcAttr = &syscall.SysProcAttr{
-			ShowWindow: 7, // SW_SHOWMINIMIZED
+			HideWindow: true, // 核心修正：使用标准 Windows Go 属性，静默启动窗口
 		}
 		err := associatedCmd.Start()
 		if err != nil {
@@ -262,7 +261,6 @@ func startAssociatedApp() {
 	}
 }
 
-// 彻底终止外部软件进程
 func stopAssociatedApp() {
 	if associatedCmd != nil && associatedCmd.Process != nil {
 		log.Infoln("[System] Terminating associated app (PID: %d)...", associatedCmd.Process.Pid)
@@ -323,7 +321,7 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 				user32.NewProc("EnableWindow").Call(uintptr(hInputEdit), 0)
 				user32.NewProc("EnableWindow").Call(uintptr(hButtonStart), 0)
 				user32.NewProc("EnableWindow").Call(uintptr(hButtonChoose), 0)
-				user32.NewProc("EnableWindow").Call(uintptr(hButtonStop), 1) // 激活停止按钮
+				user32.NewProc("EnableWindow").Call(uintptr(hButtonStop), 1)
 				go runFunc()
 			}
 		case IDC_BUTTON_STOP:
@@ -331,7 +329,6 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 				log.Infoln("[System] Closing tunnel and releasing system network resources...")
 				isRunning = false
 
-				// 1. 关闭所有本地监听端口，强行释放端口资源
 				for _, l := range ActiveListeners {
 					_ = l.Close()
 				}
@@ -341,20 +338,16 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 				}
 				ActivePacketConns = nil
 
-				// 2. 删除 TUN 虚拟网卡驱动
 				DeleteTunDevice("cftun0")
-
-				// 3. 同步彻底杀掉关联软件（如 TeamViewer）的后台实例
 				stopAssociatedApp()
 
-				// 4. 重置界面按钮状态，允许重新启动
 				procSetWindowText.Call(uintptr(hButtonStart), uintptr(unsafe.Pointer(textToUTF16("一键激活加速隧道"))))
 				user32.NewProc("EnableWindow").Call(uintptr(hRadioServer), 1)
 				user32.NewProc("EnableWindow").Call(uintptr(hRadioClient), 1)
 				user32.NewProc("EnableWindow").Call(uintptr(hInputEdit), 1)
 				user32.NewProc("EnableWindow").Call(uintptr(hButtonStart), 1)
 				user32.NewProc("EnableWindow").Call(uintptr(hButtonChoose), 1)
-				user32.NewProc("EnableWindow").Call(uintptr(hButtonStop), 0) // 禁用停止按钮
+				user32.NewProc("EnableWindow").Call(uintptr(hButtonStop), 0)
 
 				log.Infoln("[System] Engine stopped successfully. Ready for next connection.")
 			}
@@ -395,7 +388,6 @@ func WriteLogToGui(text string) {
 			}
 		}
 
-		// 联动启动：一旦底层网络完全连通（即接收到 Connected / Tunnel / Stack 提示），自动拉起关联 exe
 		if strings.Contains(cleanText, "[Tunnel] Connected successfully") || strings.Contains(cleanText, "[STACK] tun://") {
 			go startAssociatedApp()
 		}
@@ -441,12 +433,11 @@ func StartWindowsGUI(onStart func()) {
 		uintptr(unsafe.Pointer(className)),
 		uintptr(unsafe.Pointer(textToUTF16("CFTUN 远程桌面专属加速控制面板"))),
 		WS_OVERLAPPEDWINDOW|WS_VISIBLE,
-		100, 100, 640, 580, // 大号美化窗口尺寸
+		100, 100, 640, 580,
 		0, 0, hInstance, 0,
 	)
 	hMainWindow = syscall.Handle(hMainVal)
 
-	// 大号美化字体
 	hFontNormal, _, _ := gdi32.NewProc("CreateFontW").Call(
 		16, 0, 0, 0, 400, 0, 0, 0,
 		1, 0, 0, 0, 0,
@@ -534,7 +525,7 @@ func StartWindowsGUI(onStart func()) {
 		WS_CHILD|WS_VISIBLE, 315, 185, 285, 60, hMainVal, IDC_BUTTON_STOP, hInstance, 0,
 	)
 	hButtonStop = syscall.Handle(hButtonStopVal)
-	user32.NewProc("EnableWindow").Call(uintptr(hButtonStop), 0) // 默认未开启时禁用“停止”
+	user32.NewProc("EnableWindow").Call(uintptr(hButtonStop), 0)
 
 	hCheckAdvancedVal, _, _ := procCreateWindow.Call(
 		0, uintptr(unsafe.Pointer(textToUTF16("BUTTON"))), uintptr(unsafe.Pointer(textToUTF16("高级设置：显示底层全量 Debug 日志"))),
@@ -542,7 +533,7 @@ func StartWindowsGUI(onStart func()) {
 	)
 	hCheckAdvanced = syscall.Handle(hCheckAdvancedVal)
 
-	// 6. 日志监视编辑框 (高度略有调整，为上方留空)
+	// 6. 日志监视编辑框
 	hLogBoxVal, _, _ := procCreateWindow.Call(
 		0x00000200, uintptr(unsafe.Pointer(textToUTF16("EDIT"))), 0,
 		WS_CHILD|WS_VISIBLE|ES_MULTILINE|ES_AUTOVSCROLL|WS_VSCROLL|0x0800,
@@ -559,7 +550,7 @@ func StartWindowsGUI(onStart func()) {
 		user32.NewProc("SendMessageW").Call(uintptr(ctrl), 0x0030, uintptr(hFontNormal), 1)
 	}
 
-	// 应用“微软雅黑-加粗”字体 (大按钮与文本框)
+	// 应用“微软雅黑-加粗”字体
 	allBoldControls := []syscall.Handle{hDomainEdit, hButtonCopy, hInputEdit, hButtonStart, hButtonStop}
 	for _, ctrl := range allBoldControls {
 		user32.NewProc("SendMessageW").Call(uintptr(ctrl), 0x0030, uintptr(hFontBold), 1)
