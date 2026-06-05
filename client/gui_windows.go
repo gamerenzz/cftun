@@ -111,7 +111,7 @@ func StartWindowsGUI(onStart func()) {
 		LpfnWndProc:   syscall.NewCallback(wndProc),
 		HInstance:     syscall.Handle(hInstance),
 		HbrBackground: syscall.Handle(5), // COLOR_WINDOW
-		wc.LpszClassName: className,
+		LpszClassName: className,
 	}
 	wc.CbSize = uint32(unsafe.Sizeof(wc))
 	procRegisterClass.Call(uintptr(unsafe.Pointer(&wc)))
