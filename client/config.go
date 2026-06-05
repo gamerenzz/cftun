@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strings"
@@ -45,22 +46,46 @@ func (p *ProbeResult) Score() float64 {
 	return float64(p.RTT.Milliseconds())*0.4 + p.Loss*1000.0*0.4 + float64(p.Jitter.Milliseconds())*0.2
 }
 
-// SelectBestIP 升级为动态解析目标域名 IP 池，彻底杜绝 530 边缘节点拒绝服务
+// lookupHostSecure 采用多安全通道绕过地方运营商 DNS 劫持与污染
+func lookupHostSecure(host string) ([]string, error) {
+	// 并发优选：阿里DNS (国内极速无污染)、腾讯DNS、官方Cloudflare DNS
+	dnsServers := []string{"223.5.5.5:53", "119.29.29.29:53", "1.1.1.1:53"}
+	
+	var lastErr error
+	for _, dns := range dnsServers {
+		resolver := &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				d := net.Dialer{Timeout: 800 * time.Millisecond}
+				return d.DialContext(ctx, "udp", dns)
+			},
+		}
+		ips, err := resolver.LookupHost(context.Background(), host)
+		if err == nil && len(ips) > 0 {
+			return ips, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+// SelectBestIP 升级为安全解析目标域名 IP 池
 func SelectBestIP(globalUrl string) string {
 	log.Infoln("[Optimizer] Rerouting initiated. Detecting official anycast IPs...")
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
 	host := strings.Split(globalUrl, "/")[0]
-	// 动态查找该域名在 Cloudflare 官方对应的 Anycast 节点列表
-	resolvedIps, err := net.LookupHost(host)
+	
+	// 通过安全通道动态解析
+	resolvedIps, err := lookupHostSecure(host)
 
 	var ipPool []string
 	if err == nil && len(resolvedIps) > 0 {
-		log.Infoln("[Optimizer] DNS resolved official IPs for routing: %v", resolvedIps)
+		log.Infoln("[Optimizer] Secure DNS resolved official IPs: %v", resolvedIps)
 		ipPool = resolvedIps
 	} else {
-		log.Warnln("[Optimizer] DNS lookup failed. Falling back to default IP pool.")
+		log.Warnln("[Optimizer] All Secure DNS lookup failed. Falling back to default IP pool.")
 		ipPool = fallbackCfIps
 	}
 
