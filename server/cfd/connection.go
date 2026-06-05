@@ -72,7 +72,6 @@ func (q *QuicConnection) Serve(ctx context.Context, credentials *Credentials, co
 			log.Errorln(err.Error())
 		}
 		if connectionDetail != nil && connectionDetail.TunnelIsRemotelyManaged {
-			// 修复：将 println 重定向到面板日志系统
 			log.Infoln("[Tunnel] Connected successfully to Cloudflare Edge: %s", connectionDetail.Location)
 			break
 		}
@@ -119,8 +118,11 @@ func (q *QuicConnection) handleQuicStream(quicStream quic.Stream) {
 		return
 	}
 	if network != "" && address != "" {
+		// 输出客户端连接接入提示
+		log.Infoln("[Tunnel] Incoming proxy connection to local service: %s://%s", network, address)
 		remoteConn, err = q.DialWithRetry(network, address, 3)
 		if err != nil {
+			log.Errorln("[Tunnel] Failed to dial local target: %s", err.Error())
 			return
 		}
 	}
