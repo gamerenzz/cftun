@@ -1,6 +1,7 @@
 package argo
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/fmnx/cftun/client/tun/dialer"
 	"github.com/fmnx/cftun/client/tun/metadata"
+	"github.com/fmnx/cftun/log"
 	"github.com/gorilla/websocket"
 )
 
@@ -36,7 +38,6 @@ type Websocket struct {
 	stopChan  chan struct{}
 	connPool  chan net.Conn
 
-	// V2：增加多流相互独立的高速控制专线，防止队头阻塞
 	interactivePool chan net.Conn
 }
 
@@ -44,13 +45,14 @@ func NewWebsocket(params *Params) *Websocket {
 	hostPath := strings.Split(params.Url, "/")
 	host := hostPath[0]
 
+	// 核心安全升级：显式注入 TLS SNI 服务器名称，防止 IP 直连时被 Cloudflare 拒绝
 	wsDialer := &websocket.Dialer{
-		TLSClientConfig:   nil,
+		TLSClientConfig:   &tls.Config{ServerName: host},
 		Proxy:             http.ProxyFromEnvironment,
 		HandshakeTimeout:  3 * time.Second,
 		ReadBufferSize:    32 << 10,
 		WriteBufferSize:   32 << 10,
-		EnableCompression: false, // 远程桌面自带高度压缩，二次压缩反而加重开销
+		EnableCompression: false,
 	}
 
 	address := net.JoinHostPort(params.CdnIP, strconv.Itoa(params.Port))
@@ -61,9 +63,10 @@ func NewWebsocket(params *Params) *Websocket {
 		return dialer.Dial(network, addr)
 	}
 
+	// 核心安全升级：伪装成标准的 Windows 11 Chrome 浏览器，彻底绕过 trycloudflare 域名的防爬虫安全阻拦
 	headers := make(http.Header)
 	headers.Set("Host", host)
-	headers.Set("User-Agent", "DEV")
+	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
 	ws := &Websocket{
 		params:          params,
@@ -74,7 +77,7 @@ func NewWebsocket(params *Params) *Websocket {
 		connCount:       &atomic.Int32{},
 		stopChan:        make(chan struct{}),
 		connPool:        make(chan net.Conn, params.PoolSize),
-		interactivePool: make(chan net.Conn, 4), // 建立4个预备交互专线
+		interactivePool: make(chan net.Conn, 4),
 	}
 	return ws
 }
@@ -120,7 +123,7 @@ func (w *Websocket) header(metadata *metadata.Metadata) http.Header {
 
 	header := make(http.Header, len(w.headers))
 	header.Set("Host", w.headers.Get("Host"))
-	header.Set("User-Agent", "DEV")
+	header.Set("User-Agent", w.headers.Get("User-Agent"))
 	header.Set("Forward-Dest", metadata.DestinationAddress())
 	header.Set("Forward-Proto", metadata.Network.String())
 	return header
@@ -128,28 +131,35 @@ func (w *Websocket) header(metadata *metadata.Metadata) http.Header {
 
 func (w *Websocket) connect(metadata *metadata.Metadata) (net.Conn, error) {
 	wsConn, resp, err := w.wsDialer.Dial(w.Url, w.header(metadata))
+	
+	// 诊断增强：如果握手失败，详细输出 Cloudflare 的 HTTP 拦截状态码
+	if err != nil {
+		status := "N/A"
+		if resp != nil {
+			status = resp.Status
+		}
+		log.Errorln("[Tunnel] Handshake refused by Cloudflare. Status: %s | Error: %s", status, err.Error())
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		return nil, err
+	}
+
 	if resp != nil && resp.Body != nil {
 		_ = resp.Body.Close()
 	}
 
-	if err != nil {
-		return nil, err
-	}
-
-	// 针对交互专线及常规传输流统一包装，利用 QoS 自动分包器分配优先级
 	return dialer.NewQoSConn(&GorillaConn{Conn: wsConn}), nil
 }
 
 func (w *Websocket) Dial(metadata *metadata.Metadata) (conn net.Conn, headerSent bool, err error) {
 	defer func() { go w.preDial() }()
 
-	// V2：对于交互控制小包流（UDP信令或特定端口），调度到独立的交互专用连接上发送，免受屏幕刷新等大包排队影响
 	if metadata != nil && (metadata.Network.String() == "udp" || metadata.DstPort == 5938 || metadata.DstPort == 3389) {
 		select {
 		case conn = <-w.interactivePool:
 			return conn, false, nil
 		default:
-			// 如果缓存专线不够，现场开辟控制专线以确保低延迟
 			conn, err = w.connect(metadata)
 			headerSent = true
 			return conn, headerSent, err
