@@ -3,6 +3,7 @@ package client
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
@@ -132,6 +133,7 @@ var (
 	showAllLogs  = false
 	runFunc      func()
 
+	// 补全导入后，这两个类型在 Windows 交叉编译时将完美通过校验
 	ActiveListeners   []net.Listener
 	ActivePacketConns []net.PacketConn
 
@@ -274,7 +276,6 @@ func stopAssociatedApp() {
 func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 	switch msg {
 	case 0x0138, 0x0133: // WM_CTLCOLORSTATIC, WM_CTLCOLOREDIT
-		// 核心拦截：将控制端的组网专用 IP 输入框文本渲染为加粗深红色，突出醒目
 		if lParam == uintptr(hIpEdit) {
 			gdi32.NewProc("SetTextColor").Call(wParam, 0x000000FF) // RGB(255, 0, 0)
 			gdi32.NewProc("SetBkMode").Call(wParam, 1)             // TRANSPARENT
@@ -445,31 +446,30 @@ func StartWindowsGUI(onStart func()) {
 		LpszClassName: className,
 	}
 	wc.CbSize = uint32(unsafe.Sizeof(wc))
-	procRegisterClass.Call(uintptr(unsafe.Pointer(&wc)))
+	procRegisterClass.Call(unsafe.Pointer(&wc))
 
 	hMainVal, _, _ := procCreateWindow.Call(
 		0,
 		uintptr(unsafe.Pointer(className)),
 		uintptr(unsafe.Pointer(textToUTF16("CFTUN 远程桌面专属加速控制面板"))),
 		WS_OVERLAPPEDWINDOW|WS_VISIBLE,
-		100, 100, 680, 640, // 核心升级：扩大整体渲染宽度和高度
+		100, 100, 680, 640,
 		0, 0, hInstance, 0,
 	)
 	hMainWindow = syscall.Handle(hMainVal)
 
-	// 核心升级：将普通和粗体字号大幅提升，改善可读性
 	hFontNormal, _, _ := gdi32.NewProc("CreateFontW").Call(
-		18, 0, 0, 0, 400, 0, 0, 0, // 升级为18号正常体
+		18, 0, 0, 0, 400, 0, 0, 0,
 		1, 0, 0, 0, 0,
 		uintptr(unsafe.Pointer(textToUTF16("Microsoft YaHei"))),
 	)
 	hFontBold, _, _ := gdi32.NewProc("CreateFontW").Call(
-		22, 0, 0, 0, 700, 0, 0, 0, // 升级为22号极粗体
+		22, 0, 0, 0, 700, 0, 0, 0,
 		1, 0, 0, 0, 0,
 		uintptr(unsafe.Pointer(textToUTF16("Microsoft YaHei"))),
 	)
 	hFontLog, _, _ := gdi32.NewProc("CreateFontW").Call(
-		16, 0, 0, 0, 400, 0, 0, 0, // 终端日志维持舒适的16号
+		16, 0, 0, 0, 400, 0, 0, 0,
 		1, 0, 0, 0, 0,
 		uintptr(unsafe.Pointer(textToUTF16("Microsoft YaHei"))),
 	)
@@ -544,7 +544,7 @@ func StartWindowsGUI(onStart func()) {
 	)
 	hIpCopyBtn = syscall.Handle(hIpCopyBtnVal)
 
-	// 5. 关联启动 EXE 选择组件 (整体下移一行，保持工整)
+	// 5. 关联启动 EXE 选择组件
 	hButtonChooseVal, _, _ := procCreateWindow.Call(
 		0, uintptr(unsafe.Pointer(textToUTF16("BUTTON"))), uintptr(unsafe.Pointer(textToUTF16("选择要关联启动的软件 (.exe)"))),
 		WS_CHILD|WS_VISIBLE, 10, 190, 280, 40, hMainVal, IDC_BUTTON_CHOOSE, hInstance, 0,
@@ -577,7 +577,7 @@ func StartWindowsGUI(onStart func()) {
 	)
 	hCheckAdvanced = syscall.Handle(hCheckAdvancedVal)
 
-	// 7. 日志监视编辑框 (底盘下移)
+	// 7. 日志监视编辑框
 	hLogBoxVal, _, _ := procCreateWindow.Call(
 		0x00000200, uintptr(unsafe.Pointer(textToUTF16("EDIT"))), 0,
 		WS_CHILD|WS_VISIBLE|ES_MULTILINE|ES_AUTOVSCROLL|WS_VSCROLL|0x0800,
