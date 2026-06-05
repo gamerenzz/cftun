@@ -2,6 +2,7 @@ package client
 
 import (
 	"fmt"
+	"runtime"
 	"syscall"
 	"unsafe"
 
@@ -30,7 +31,6 @@ const (
 	WM_COMMAND          = 0x0111
 	WM_DESTROY          = 0x0002
 
-	// Win32 Edit 控件追加消息，规避死锁
 	EM_SETSEL     = 0x00B1
 	EM_REPLACESEL = 0x00C2
 )
@@ -90,18 +90,20 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 	return 0
 }
 
-// WriteLogToGui 采用高效、无死锁的 EM_SETSEL + EM_REPLACESEL 机制在末尾追加日志
 func WriteLogToGui(text string) {
 	if hLogBox != 0 {
 		utf16Text := textToUTF16(text + "\r\n")
 		// 将编辑框的光标移到最后
 		user32.NewProc("SendMessageW").Call(uintptr(hLogBox), EM_SETSEL, uintptr(0xFFFFFFFF), uintptr(0xFFFFFFFF))
-		// 在当前光标（即末尾）直接追加文本，避免读取和全选，彻底防止界面挂起
+		// 无死锁原地追加文本
 		user32.NewProc("SendMessageW").Call(uintptr(hLogBox), EM_REPLACESEL, uintptr(0), uintptr(unsafe.Pointer(utf16Text)))
 	}
 }
 
 func StartWindowsGUI(onStart func()) {
+	// 核心修复：强制锁定 Windows OS 渲染主线程，彻底消除未响应死锁
+	runtime.LockOSThread()
+	
 	runFunc = onStart
 	hInstance, _, _ := kernel32.NewProc("GetModuleHandleW").Call(0)
 
@@ -110,7 +112,7 @@ func StartWindowsGUI(onStart func()) {
 		Style:         0,
 		LpfnWndProc:   syscall.NewCallback(wndProc),
 		HInstance:     syscall.Handle(hInstance),
-		HbrBackground: syscall.Handle(5), // COLOR_WINDOW
+		HbrBackground: syscall.Handle(5),
 		LpszClassName: className,
 	}
 	wc.CbSize = uint32(unsafe.Sizeof(wc))
@@ -125,9 +127,8 @@ func StartWindowsGUI(onStart func()) {
 		0, 0, hInstance, 0,
 	)
 
-	// 控制台日志编辑框
 	hLogBoxVal, _, _ := procCreateWindow.Call(
-		0x00000200, // WS_EX_CLIENTEDGE
+		0x00000200,
 		uintptr(unsafe.Pointer(textToUTF16("EDIT"))),
 		0,
 		WS_CHILD|WS_VISIBLE|ES_MULTILINE|ES_AUTOVSCROLL|WS_VSCROLL|0x0800,
@@ -136,8 +137,7 @@ func StartWindowsGUI(onStart func()) {
 	)
 	hLogBox = syscall.Handle(hLogBoxVal)
 
-	// 启动控制按钮
-	hBtnVal, _, _ := procCreateWindow.Call(
+	hButtonVal, _, _ := procCreateWindow.Call(
 		0,
 		uintptr(unsafe.Pointer(textToUTF16("BUTTON"))),
 		uintptr(unsafe.Pointer(textToUTF16("一键激活远程桌面全链路加速"))),
@@ -145,10 +145,9 @@ func StartWindowsGUI(onStart func()) {
 		10, 350, 580, 55,
 		hMain, 0, hInstance, 0,
 	)
-	hButton = syscall.Handle(hBtnVal)
+	hButton = syscall.Handle(hButtonVal)
 
-	log.Infoln("[GUI] Control panel loaded successfully.")
-
+	// 先行订阅日志，确保启动日志不丢失
 	go func() {
 		sub, err := log.Subscribe()
 		if err == nil {
@@ -157,6 +156,8 @@ func StartWindowsGUI(onStart func()) {
 			}
 		}
 	}()
+
+	log.Infoln("[GUI] Control panel loaded successfully.")
 
 	var msg MSG
 	for {
