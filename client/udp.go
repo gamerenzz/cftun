@@ -49,15 +49,12 @@ var (
 
 func init() {
 	cpus := runtime.NumCPU()
-	// Use goroutines to process outbound queue concurrently
 	for i := 0; i < cpus; i++ {
 		go processOutboundQueue()
 	}
 }
 
-// UdpListen on addr.
 func UdpListen(config *Config, tunnel *Tunnel) {
-	// 监听指定网卡源地址
 	listener, err := net.ListenPacket("udp", tunnel.Listen)
 	if err != nil {
 		log.Errorln("UDP listen error: %v", err)
@@ -65,10 +62,12 @@ func UdpListen(config *Config, tunnel *Tunnel) {
 	}
 	defer listener.Close()
 
+	// 注册到全局活动追踪队列，支持停止时一键物理回收
+	ActivePacketConns = append(ActivePacketConns, listener)
+
 	log.Infoln("UDP listen on %s", tunnel.Listen)
 
 	ws := NewWebsocket(config, tunnel)
-
 	udpConns := &sync.Map{}
 
 	for {
@@ -111,21 +110,18 @@ func UdpListen(config *Config, tunnel *Tunnel) {
 	}
 }
 
-// Process inbound queue and send data to remote
 func (c *Connector) processInboundQueue() {
 	for data := range c.inboundQueue {
 		n := data.len
 		buf := data.buf
 
 		if _, err := c.remoteConn.Write(buf[:n]); err != nil {
-			//log.Errorln("Error writing to remote: %v", err)
 		}
 
 		udpBufPool.Put(buf)
 	}
 }
 
-// Process outbound queue and send data
 func processOutboundQueue() {
 	for data := range outboundQueue {
 		n := data.len
@@ -133,7 +129,6 @@ func processOutboundQueue() {
 		listener := data.listener
 		srcAddr := data.srcAddr
 
-		// Write data to client
 		if _, err := listener.WriteTo(buf[:n], srcAddr); err != nil {
 			log.Errorln("Error writing to client %v: %v", srcAddr, err)
 		}
@@ -174,7 +169,6 @@ func (c *Connector) ReadFromRemote(b []byte) (n int, err error) {
 func (c *Connector) healthCheck() {
 	for {
 		if time.Now().After(c.lastRecvTime.Add(c.idleTimeout * time.Second)) {
-			//log.Infoln("UDP: %s -> %s closed.", c.srcAddr.String(), c.listener.LocalAddr().String())
 			c.mu.Lock()
 			c.closed = true
 			close(c.inboundQueue)
@@ -199,7 +193,6 @@ func (c *Connector) handleRemote() {
 			return
 		}
 
-		// Send data to outbound queue
 		outboundQueue <- &OutboundData{
 			len:      n,
 			buf:      buf,
