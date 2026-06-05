@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/fmnx/cftun/client/tun/dialer"
+	"github.com/fmnx/cftun/client/tun/engine"
 	"github.com/fmnx/cftun/client/tun/transport/argo"
 	"github.com/fmnx/cftun/log"
 	"github.com/gorilla/websocket"
@@ -67,12 +68,10 @@ func NewWebsocket(config *Config, tunnel *Tunnel) *Websocket {
 		url:      fmt.Sprintf("%s://%s", config.getScheme(), tunnel.Url),
 	}
 
-	// 启动链路质量动态评估与漂移引擎
 	go ws.monitorLinkQualityAndFailover()
 	return ws
 }
 
-// monitorLinkQualityAndFailover 动态采集 RTT、抖动、丢包，给出实时链路评级，并自动漂移不良链路
 func (w *Websocket) monitorLinkQualityAndFailover() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -91,14 +90,12 @@ func (w *Websocket) monitorLinkQualityAndFailover() {
 			continue
 		}
 
-		// 计算即时网络抖动 (Jitter)
 		jitter := latency - lastLatency
 		if jitter < 0 {
 			jitter = -jitter
 		}
 		lastLatency = latency
 
-		// 链路质量动态评分系统 (Link Quality Rating)
 		rating := "Excellent (极佳)"
 		if latency > 180 || loss > 1 || jitter > 25 {
 			rating = "Good (良好)"
@@ -110,13 +107,20 @@ func (w *Websocket) monitorLinkQualityAndFailover() {
 		log.Infoln("[Monitor] Active Tunnel Status: RTT: %dms | Jitter: %dms | LossMetric: %d | Rating: %s",
 			latency, jitter, loss, rating)
 
-		// P2 预防性主动漂移触发判定：若链路评级退化为 "较差"，提前静默重组连接，保障远程桌面不发生任何卡顿
+		// P2 真·连接漂移式 Failover
 		if rating == "Poor (较差)" {
-			log.Warnln("[Failover] Quality degraded to Poor. Initiating preventive anycast rerouting...")
+			log.Warnln("[Failover] Quality degraded to Poor. Initiating active connection migration...")
 			w.lossCounter.Store(0)
 			w.latencyValue.Store(0)
+			
+			// 1. 在本地更新最优 Anycast IP
 			newIP := SelectBestIP(w.config.GlobalUrl)
 			w.config.CdnIp = newIP
+
+			// 2. 强行驱逐、断开并重建当前的物理连接池，将旧物理连接斩断，实现无缝热迁移
+			if engine.ArgoProxy != nil {
+				engine.ArgoProxy.MigratePools()
+			}
 		}
 	}
 }
@@ -136,7 +140,6 @@ func (w *Websocket) createWebsocketStream() (net.Conn, error) {
 			_ = resp.Body.Close()
 		}
 		
-		// 故障漂移
 		w.config.CdnIp = SelectBestIP(w.config.GlobalUrl)
 		wsConn, resp, err = w.wsDialer.Dial(w.url, w.headers)
 		if err != nil {
