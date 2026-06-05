@@ -28,7 +28,6 @@ type Websocket struct {
 func NewWebsocket(config *Config, tunnel *Tunnel) *Websocket {
 	host := strings.Split(tunnel.Url, "/")[0]
 	
-	// 核心安全升级：显式注入 TLS SNI 服务器名称，防止 IP 直连时被 Cloudflare 拒绝
 	wsDialer := &websocket.Dialer{
 		TLSClientConfig:   &tls.Config{ServerName: host},
 		Proxy:             http.ProxyFromEnvironment,
@@ -54,7 +53,6 @@ func NewWebsocket(config *Config, tunnel *Tunnel) *Websocket {
 		return dial(network, addr)
 	}
 
-	// 核心安全升级：伪装成标准的 Windows 11 Chrome 浏览器，彻底避开 trycloudflare 域名的安全策略墙
 	headers := make(http.Header)
 	headers.Set("Host", host)
 	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -84,7 +82,7 @@ func (w *Websocket) monitorFailoverLoop() {
 		if (latency > 200) || (loss > 3) {
 			log.Warnln("[Failover] Channel quality degraded (RTT: %dms, LossMetric: %d). Performing preventive switchover...", latency, loss)
 			w.lossCounter.Store(0)
-			newIP := SelectBestIP()
+			newIP := SelectBestIP(w.config.GlobalUrl)
 			w.config.CdnIp = newIP
 		}
 	}
@@ -105,8 +103,8 @@ func (w *Websocket) createWebsocketStream() (net.Conn, error) {
 			_ = resp.Body.Close()
 		}
 		
-		// 故障漂移
-		w.config.CdnIp = SelectBestIP()
+		// 故障漂移，传递域名引导精确定向
+		w.config.CdnIp = SelectBestIP(w.config.GlobalUrl)
 		wsConn, resp, err = w.wsDialer.Dial(w.url, w.headers)
 		if err != nil {
 			return nil, err
