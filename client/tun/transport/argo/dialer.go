@@ -38,7 +38,6 @@ type Websocket struct {
 	stopChan  chan struct{}
 	connPool  chan net.Conn
 
-	// 真·高活性控制交互连接池（常备 4 个完全就绪连接）
 	interactivePool chan net.Conn
 }
 
@@ -79,12 +78,44 @@ func NewWebsocket(params *Params) *Websocket {
 		interactivePool: make(chan net.Conn, 4),
 	}
 
-	// 启动时，主动在后台预热建立 4 个高活性控制专用连接，消灭建连延迟
 	go ws.preWarmInteractivePool()
 	return ws
 }
 
-// 预热 4 条完全就绪的 WSS 链路，随时待命
+// ForceResetPools 强制释放当前池子中所有的旧连接，阻断旧物理链路，强行激发无感迁移
+func (w *Websocket) ForceResetPools() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	log.Infoln("[Failover] Evicting active connections and clearing pools for migration...")
+
+	// 1. 清空并关闭普通连接池
+	for {
+		select {
+		case conn := <-w.connPool:
+			_ = conn.Close()
+		default:
+			goto resetInteractive
+		}
+	}
+
+resetInteractive:
+	// 2. 清空并关闭交互连接池
+	for {
+		select {
+		case conn := <-w.interactivePool:
+			_ = conn.Close()
+		default:
+			goto rebuild
+		}
+	}
+
+rebuild:
+	w.connCount.Store(0)
+	// 3. 立刻重新预热基于新 IP 的 4 条新连接，等待应用毫秒级内自动接入
+	go w.preWarmInteractivePool()
+}
+
 func (w *Websocket) preWarmInteractivePool() {
 	log.Infoln("[Optimizer] Pre-warming 4 high-speed interactive WebSocket streams to Cloudflare...")
 	for i := 0; i < 4; i++ {
@@ -93,7 +124,6 @@ func (w *Websocket) preWarmInteractivePool() {
 			if err == nil {
 				select {
 				case w.interactivePool <- conn:
-					// 成功置入常备队列
 				default:
 					_ = conn.Close()
 				}
@@ -102,7 +132,6 @@ func (w *Websocket) preWarmInteractivePool() {
 	}
 }
 
-// 自动补货机制，维持 4 个常备就绪连接的动态平衡
 func (w *Websocket) replenishInteractive() {
 	conn, err := w.connect(nil)
 	if err == nil {
@@ -195,15 +224,12 @@ func (w *Websocket) connect(metadata *metadata.Metadata) (net.Conn, error) {
 func (w *Websocket) Dial(metadata *metadata.Metadata) (conn net.Conn, headerSent bool, err error) {
 	defer func() { go w.preDial() }()
 
-	// 真正的预连接调度：控制小包流在 0 毫秒内瞬间取用已经建立好并完成握手的常备连接！
 	if metadata != nil && (metadata.Network.String() == "udp" || metadata.DstPort == 5938 || metadata.DstPort == 3389) {
 		select {
 		case conn = <-w.interactivePool:
-			// 自动异步补货，确保池子里永远有 4 个待命
 			go w.replenishInteractive()
 			return conn, false, nil
 		default:
-			// 极其罕见的瞬时耗尽降级备用
 			conn, err = w.connect(metadata)
 			headerSent = true
 			return conn, headerSent, err
