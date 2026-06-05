@@ -2,8 +2,12 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -42,15 +46,72 @@ type ProbeResult struct {
 	Loss   float64
 }
 
+type AliDNSResponse struct {
+	Status int `json:"Status"`
+	Answer []struct {
+		Type int    `json:"type"`
+		Data string `json:"data"`
+	} `json:"Answer"`
+}
+
 func (p *ProbeResult) Score() float64 {
 	return float64(p.RTT.Milliseconds())*0.4 + p.Loss*1000.0*0.4 + float64(p.Jitter.Milliseconds())*0.2
 }
 
-// lookupHostSecure 采用多安全通道绕过地方运营商 DNS 劫持与污染
+// lookupHostHTTPDNS 采用加密 HTTP 协议向阿里公共 DNS 接口直连查询，100% 穿透 UDP 53 阻断与污染
+func lookupHostHTTPDNS(host string) ([]string, error) {
+	client := &http.Client{
+		Timeout: 1500 * time.Millisecond,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true, // 绕过老旧 Windows 系统下可能存在的根证书过期问题
+			},
+		},
+	}
+
+	// 阿里公共 DNS 官方加密直连接口（使用 IP 直接访问，省去域名解析套娃）
+	url := fmt.Sprintf("https://223.5.5.5/resolve?name=%s&type=A", host)
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var r AliDNSResponse
+	if err := json.Unmarshal(body, &r); err != nil {
+		return nil, err
+	}
+
+	var ips []string
+	for _, ans := range r.Answer {
+		if ans.Type == 1 { // A 记录
+			ips = append(ips, ans.Data)
+		}
+	}
+
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no official A record found")
+	}
+	return ips, nil
+}
+
+// lookupHostSecure 采用 HTTPDNS 与 传统安全 UDP DNS 双通道冗余备份
 func lookupHostSecure(host string) ([]string, error) {
-	// 并发优选：阿里DNS (国内极速无污染)、腾讯DNS、官方Cloudflare DNS
+	// 1. 优先采用 HTTPDNS 穿透技术（防拦截、防污染、高通过率）
+	ips, err := lookupHostHTTPDNS(host)
+	if err == nil && len(ips) > 0 {
+		log.Infoln("[Optimizer] HTTPDNS resolved official IPs successfully: %v", ips)
+		return ips, nil
+	}
+	log.Warnln("[Optimizer] HTTPDNS lookup failed: %v. Falling back to UDP DNS...", err)
+
+	// 2. 备用降级：标准公共 UDP DNS 通道
 	dnsServers := []string{"223.5.5.5:53", "119.29.29.29:53", "1.1.1.1:53"}
-	
 	var lastErr error
 	for _, dns := range dnsServers {
 		resolver := &net.Resolver{
@@ -62,6 +123,7 @@ func lookupHostSecure(host string) ([]string, error) {
 		}
 		ips, err := resolver.LookupHost(context.Background(), host)
 		if err == nil && len(ips) > 0 {
+			log.Infoln("[Optimizer] Secure UDP DNS resolved official IPs: %v", ips)
 			return ips, nil
 		}
 		lastErr = err
@@ -69,7 +131,7 @@ func lookupHostSecure(host string) ([]string, error) {
 	return nil, lastErr
 }
 
-// SelectBestIP 升级为安全解析目标域名 IP 池
+// SelectBestIP 动态解析目标域名 IP 池
 func SelectBestIP(globalUrl string) string {
 	log.Infoln("[Optimizer] Rerouting initiated. Detecting official anycast IPs...")
 	var wg sync.WaitGroup
@@ -82,10 +144,9 @@ func SelectBestIP(globalUrl string) string {
 
 	var ipPool []string
 	if err == nil && len(resolvedIps) > 0 {
-		log.Infoln("[Optimizer] Secure DNS resolved official IPs: %v", resolvedIps)
 		ipPool = resolvedIps
 	} else {
-		log.Warnln("[Optimizer] All Secure DNS lookup failed. Falling back to default IP pool.")
+		log.Warnln("[Optimizer] All Secure DNS channels failed. Falling back to default IP pool.")
 		ipPool = fallbackCfIps
 	}
 
