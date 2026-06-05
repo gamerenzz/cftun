@@ -2,11 +2,9 @@ package client
 
 import (
 	"fmt"
-	"net"
 	"os/exec"
 	"runtime"
 	"syscall"
-	"time"
 
 	tunToArgo "github.com/fmnx/cftun/client/tun/engine"
 	"github.com/fmnx/cftun/client/tun/proxy"
