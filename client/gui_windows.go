@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"runtime"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -71,6 +72,29 @@ func textToUTF16(s string) *uint16 {
 	return val
 }
 
+// stripANSI 过滤清除控制台彩色字符，保障 Windows 原生组件正常换行与字符显示
+func stripANSI(s string) string {
+	var buf []rune
+	inEscape := false
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if r == '\x1b' || r == '\033' {
+			inEscape = true
+			continue
+		}
+		if inEscape {
+			// ANSI 终端控制序列通常以英文字母（A-Z, a-z）结束
+			if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
+				inEscape = false
+			}
+			continue
+		}
+		buf = append(buf, r)
+	}
+	return string(buf)
+}
+
 func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 	switch msg {
 	case WM_COMMAND:
@@ -90,18 +114,27 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 	return 0
 }
 
+// WriteLogToGui 追加日志并完成视觉排版微调
 func WriteLogToGui(text string) {
 	if hLogBox != 0 {
-		utf16Text := textToUTF16(text + "\r\n")
+		cleanText := stripANSI(text)
+
+		// 核心优化：若包含临时域名，自动生成醒目的分割边框，使其极易被寻找和一键复制
+		if strings.Contains(cleanText, "THE TEMPORARY DOMAIN YOU HAVE APPLIED FOR IS:") {
+			cleanText = "\r\n============================================================\r\n" +
+				cleanText +
+				"\r\n============================================================\r\n"
+		}
+
+		utf16Text := textToUTF16(cleanText + "\r\n")
 		// 将编辑框的光标移到最后
 		user32.NewProc("SendMessageW").Call(uintptr(hLogBox), EM_SETSEL, uintptr(0xFFFFFFFF), uintptr(0xFFFFFFFF))
-		// 无死锁原地追加文本
+		// 在当前光标处追加文本
 		user32.NewProc("SendMessageW").Call(uintptr(hLogBox), EM_REPLACESEL, uintptr(0), uintptr(unsafe.Pointer(utf16Text)))
 	}
 }
 
 func StartWindowsGUI(onStart func()) {
-	// 核心修复：强制锁定 Windows OS 渲染主线程，彻底消除未响应死锁
 	runtime.LockOSThread()
 	
 	runFunc = onStart
@@ -145,9 +178,8 @@ func StartWindowsGUI(onStart func()) {
 		10, 350, 580, 55,
 		hMain, 0, hInstance, 0,
 	)
-	hButton = syscall.Handle(hButtonVal)
+	hButton = syscall.Handle(hBtnVal)
 
-	// 先行订阅日志，确保启动日志不丢失
 	go func() {
 		sub, err := log.Subscribe()
 		if err == nil {
