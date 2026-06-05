@@ -94,6 +94,10 @@ func TcpListen(config *Config, tunnel *Tunnel) {
 		return
 	}
 	defer tcpListener.Close()
+
+	// 注册到全局活动追踪队列，用以支持“停止”一键回收
+	ActiveListeners = append(ActiveListeners, tcpListener)
+
 	log.Infoln("TCP listen on %s", tunnel.Listen)
 
 	errChan := make(chan error)
