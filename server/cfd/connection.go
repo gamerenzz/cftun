@@ -72,7 +72,8 @@ func (q *QuicConnection) Serve(ctx context.Context, credentials *Credentials, co
 			log.Errorln(err.Error())
 		}
 		if connectionDetail != nil && connectionDetail.TunnelIsRemotelyManaged {
-			println(connectionDetail.Location)
+			// 修复：将 println 重定向到面板日志系统
+			log.Infoln("[Tunnel] Connected successfully to Cloudflare Edge: %s", connectionDetail.Location)
 			break
 		}
 		time.Sleep(1 * time.Second)
@@ -104,9 +105,9 @@ func (q *QuicConnection) handleQuicStream(quicStream quic.Stream) {
 
 	noCloseStream := &nopCloserReadWriter{ReadWriteCloser: stream}
 
-	n, err := noCloseStream.Read(make([]byte, 6)) //ignore 6 byte
+	n, err := noCloseStream.Read(make([]byte, 6))
 	if err != nil || n != 6 {
-		println(err.Error())
+		log.Errorln("[Tunnel] Read error: %s", err.Error())
 		return
 	}
 
@@ -173,12 +174,6 @@ func (q *QuicConnection) handleConn(ctx context.Context, cancel context.CancelFu
 				return
 			}
 
-			//if nr == 2 && buf[0] == 137 && buf[1] == 0 {
-			//	println("recv client ping msg")
-			//	_, _ = wsConn.Write([]byte{'p', 'o', 'n', 'g'})
-			//	continue
-			//}
-
 			nw, err := remoteConn.Write(buf[:nr])
 			if err != nil {
 				return
@@ -199,16 +194,12 @@ func handleRemoteConn(ctx context.Context, cancel context.CancelFunc, remoteConn
 		cancel()
 		wsConn.Close()
 		_ = remoteConn.Close()
-		//if err != nil {
-		//	fmt.Printf("handleRemoteConn exit: %v\n", err)
-		//
-		//}
 	}()
 
 	setReadDeadline := func(c net.Conn) error { return nil }
 	if _, ok := remoteConn.(*net.UDPConn); ok {
 		udpTimeout := 60 * time.Second
-		if remoteConn.RemoteAddr().(*net.UDPAddr).Port == 53 { // DNS query
+		if remoteConn.RemoteAddr().(*net.UDPAddr).Port == 53 {
 			udpTimeout = 1 * time.Second
 		}
 		setReadDeadline = func(c net.Conn) error {
@@ -263,7 +254,7 @@ func (q *QuicConnection) DialWithRetry(network, address string, maxRetries int) 
 			return nil, fmt.Errorf("non-retryable error: %w", err)
 		}
 
-		fmt.Printf("Attempt %d failed: %v. Retrying...\n", i+1, err)
+		log.Warnln("[Tunnel] Dial attempt %d failed: %v. Retrying...", i+1, err)
 
 		time.Sleep(100 * time.Millisecond)
 	}
