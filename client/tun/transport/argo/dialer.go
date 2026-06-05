@@ -45,7 +45,6 @@ func NewWebsocket(params *Params) *Websocket {
 	hostPath := strings.Split(params.Url, "/")
 	host := hostPath[0]
 
-	// 核心安全升级：显式注入 TLS SNI 服务器名称，防止 IP 直连时被 Cloudflare 拒绝
 	wsDialer := &websocket.Dialer{
 		TLSClientConfig:   &tls.Config{ServerName: host},
 		Proxy:             http.ProxyFromEnvironment,
@@ -63,7 +62,6 @@ func NewWebsocket(params *Params) *Websocket {
 		return dialer.Dial(network, addr)
 	}
 
-	// 核心安全升级：伪装成标准的 Windows 11 Chrome 浏览器，彻底绕过 trycloudflare 域名的防爬虫安全阻拦
 	headers := make(http.Header)
 	headers.Set("Host", host)
 	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -124,7 +122,18 @@ func (w *Websocket) header(metadata *metadata.Metadata) http.Header {
 	header := make(http.Header, len(w.headers))
 	header.Set("Host", w.headers.Get("Host"))
 	header.Set("User-Agent", w.headers.Get("User-Agent"))
-	header.Set("Forward-Dest", metadata.DestinationAddress())
+
+	// 核心架构升级：如果是虚拟网卡中继路由产生的 IP 流量（如 198.18.x.x）
+	// 被控端本地无法寻路，因此客户端自动将其重写为 127.0.0.1 转发给被控端本地回环
+	destAddr := metadata.DestinationAddress()
+	if strings.HasPrefix(destAddr, "198.18.") || strings.HasPrefix(destAddr, "192.168.123.") {
+		_, port, err := net.SplitHostPort(destAddr)
+		if err == nil {
+			destAddr = net.JoinHostPort("127.0.0.1", port)
+		}
+	}
+
+	header.Set("Forward-Dest", destAddr)
 	header.Set("Forward-Proto", metadata.Network.String())
 	return header
 }
@@ -132,7 +141,6 @@ func (w *Websocket) header(metadata *metadata.Metadata) http.Header {
 func (w *Websocket) connect(metadata *metadata.Metadata) (net.Conn, error) {
 	wsConn, resp, err := w.wsDialer.Dial(w.Url, w.header(metadata))
 	
-	// 诊断增强：如果握手失败，详细输出 Cloudflare 的 HTTP 拦截状态码
 	if err != nil {
 		status := "N/A"
 		if resp != nil {
