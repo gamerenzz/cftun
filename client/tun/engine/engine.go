@@ -8,8 +8,6 @@ import (
 	"github.com/fmnx/cftun/client/tun/buffer"
 	"github.com/fmnx/cftun/client/tun/core"
 	"github.com/fmnx/cftun/client/tun/core/device"
-	"github.com/fmnx/cftun/client/tun/core/device/fdbased"
-	"github.com/fmnx/cftun/client/tun/core/device/tun"
 	"github.com/fmnx/cftun/client/tun/core/option"
 	"github.com/fmnx/cftun/client/tun/dialer"
 	"github.com/fmnx/cftun/client/tun/log"
