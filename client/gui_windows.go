@@ -170,6 +170,7 @@ func StartWindowsGUI(onStart func()) {
 	)
 	hLogBox = syscall.Handle(hLogBoxVal)
 
+	// 启动控制按钮
 	hButtonVal, _, _ := procCreateWindow.Call(
 		0,
 		uintptr(unsafe.Pointer(textToUTF16("BUTTON"))),
@@ -178,7 +179,7 @@ func StartWindowsGUI(onStart func()) {
 		10, 350, 580, 55,
 		hMain, 0, hInstance, 0,
 	)
-	hButton = syscall.Handle(hBtnVal)
+	hButton = syscall.Handle(hButtonVal)
 
 	go func() {
 		sub, err := log.Subscribe()
