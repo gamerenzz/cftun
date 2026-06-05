@@ -172,7 +172,7 @@ func CopyToClipboard(text string) {
 	textLen := len(text)
 	user32.NewProc("OpenClipboard").Call(0)
 	user32.NewProc("EmptyClipboard").Call()
-	hMem, _, _ := kernel32.NewProc("GlobalAlloc").Call(0x0002, uintptr(textLen*2+2))
+	hMem, _, _ := kernel32.NewProc("GlobalAlloc").Call(0x0002, uintptr(textLen*2+2)) // GMEM_MOVEABLE
 	ptr, _, _ := kernel32.NewProc("GlobalLock").Call(hMem)
 
 	destSlice := unsafe.Slice((*uint16)(unsafe.Pointer(ptr)), textLen+1)
@@ -180,7 +180,7 @@ func CopyToClipboard(text string) {
 	copy(destSlice, srcSlice)
 
 	kernel32.NewProc("GlobalUnlock").Call(hMem)
-	user32.NewProc("SetClipboardData").Call(13, hMem)
+	user32.NewProc("SetClipboardData").Call(13, hMem) // CF_UNICODETEXT
 	user32.NewProc("CloseClipboard").Call()
 }
 
@@ -446,7 +446,9 @@ func StartWindowsGUI(onStart func()) {
 		LpszClassName: className,
 	}
 	wc.CbSize = uint32(unsafe.Sizeof(wc))
-	procRegisterClass.Call(unsafe.Pointer(&wc))
+	
+	// 核心修复：添加 uintptr 显式强转，确保 32/64 位编译器在所有平台下通过语法校验
+	procRegisterClass.Call(uintptr(unsafe.Pointer(&wc)))
 
 	hMainVal, _, _ := procCreateWindow.Call(
 		0,
