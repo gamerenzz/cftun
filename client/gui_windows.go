@@ -3,7 +3,9 @@ package client
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"syscall"
@@ -45,11 +47,13 @@ const (
 	EM_SETSEL     = 0x00B1
 	EM_REPLACESEL = 0x00C2
 
-	IDC_RADIO_SERVER   = 1001
-	IDC_RADIO_CLIENT   = 1002
-	IDC_BUTTON_START   = 1003
-	IDC_BUTTON_COPY    = 1004
-	IDC_CHECK_ADVANCED = 1005
+	IDC_RADIO_SERVER    = 1001
+	IDC_RADIO_CLIENT    = 1002
+	IDC_BUTTON_START    = 1003
+	IDC_BUTTON_COPY     = 1004
+	IDC_CHECK_ADVANCED  = 1005
+	IDC_BUTTON_STOP     = 1006
+	IDC_BUTTON_CHOOSE   = 1007
 )
 
 type WNDCLASSEXW struct {
@@ -76,23 +80,60 @@ type MSG struct {
 	Pt      struct{ X, Y int32 }
 }
 
+type OPENFILENAMEW struct {
+	LStructSize       uint32
+	HWndOwner         syscall.Handle
+	HInstance         syscall.Handle
+	LpszFilter        *uint16
+	LpszCustomFilter  *uint16
+	NMaxCustFilter    uint32
+	NFilterIndex      uint32
+	LpszFile          *uint16
+	NMaxFile          uint32
+	LpszFileTitle     *uint16
+	NMaxFileTitle     uint32
+	LpszInitialDir    *uint16
+	LpszTitle         *uint16
+	Flags             uint32
+	NFileOffset       uint16
+	NFileExtension    uint16
+	LpszDefExt        *uint16
+	LCustData         uintptr
+	LpfnHook          uintptr
+	LpszTemplateName  *uint16
+	PvReserved        unsafe.Pointer
+	DwReserved        uint32
+	DwFlagsEx         uint32
+}
+
 var (
-	hMainWindow   syscall.Handle
-	hLogBox       syscall.Handle
-	hButtonStart  syscall.Handle
-	hRadioServer  syscall.Handle
-	hRadioClient  syscall.Handle
-	hDomainLabel  syscall.Handle
-	hDomainEdit   syscall.Handle
-	hButtonCopy   syscall.Handle
-	hInputLabel   syscall.Handle
-	hInputEdit    syscall.Handle
+	hMainWindow    syscall.Handle
+	hLogBox        syscall.Handle
+	hButtonStart   syscall.Handle
+	hButtonStop    syscall.Handle
+	hRadioServer   syscall.Handle
+	hRadioClient   syscall.Handle
+	hDomainLabel   syscall.Handle
+	hDomainEdit    syscall.Handle
+	hButtonCopy    syscall.Handle
+	hInputLabel    syscall.Handle
+	hInputEdit     syscall.Handle
 	hCheckAdvanced syscall.Handle
+	hButtonChoose  syscall.Handle
+	hExePathEdit   syscall.Handle
 
 	isRunning    bool
 	isServerMode = true
 	showAllLogs  = false
 	runFunc      func()
+
+	// 端口和监听器全局追踪列表，用于彻底一键关闭
+	ActiveListeners   []net.Listener
+	ActivePacketConns []net.PacketConn
+
+	// 外部关联启动进程控制变量
+	associatedExePath string
+	associatedCmd     *exec.Cmd
 )
 
 func textToUTF16(s string) *uint16 {
@@ -121,7 +162,6 @@ func stripANSI(s string) string {
 	return string(buf)
 }
 
-// CopyToClipboard 原生 Windows 无 CGO 剪贴板复制引擎
 func CopyToClipboard(text string) {
 	utf16 := textToUTF16(text)
 	textLen := len(text)
@@ -129,15 +169,38 @@ func CopyToClipboard(text string) {
 	user32.NewProc("EmptyClipboard").Call()
 	hMem, _, _ := kernel32.NewProc("GlobalAlloc").Call(0x0002, uintptr(textLen*2+2)) // GMEM_MOVEABLE
 	ptr, _, _ := kernel32.NewProc("GlobalLock").Call(hMem)
-	
-	// 核心修复：采用 Go 1.17+ 原生的切片转换进行无损、安全的底层 C-指针内存拷贝
+
 	destSlice := unsafe.Slice((*uint16)(unsafe.Pointer(ptr)), textLen+1)
 	srcSlice := unsafe.Slice(utf16, textLen+1)
 	copy(destSlice, srcSlice)
-	
+
 	kernel32.NewProc("GlobalUnlock").Call(hMem)
 	user32.NewProc("SetClipboardData").Call(13, hMem) // CF_UNICODETEXT
 	user32.NewProc("CloseClipboard").Call()
+}
+
+// OpenExeFileDialog Windows 原生无 CGO 级别文件选择对话框
+func OpenExeFileDialog(hWnd syscall.Handle) string {
+	comdlg32 := syscall.NewLazyDLL("comdlg32.dll")
+	procGetOpenFileName := comdlg32.NewProc("GetOpenFileNameW")
+
+	fileBuf := make([]uint16, 260)
+	filter := textToUTF16("可执行文件 (*.exe)\x00*.exe\x00所有文件 (*.*)\x00*.*\x00\x00")
+
+	ofn := OPENFILENAMEW{
+		HWndOwner:  hWnd,
+		LpszFilter: filter,
+		LpszFile:   &fileBuf[0],
+		NMaxFile:   260,
+		Flags:      0x00080000 | 0x00001000 | 0x00000800, // OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST
+	}
+	ofn.LStructSize = uint32(unsafe.Sizeof(ofn))
+
+	ret, _, _ := procGetOpenFileName.Call(uintptr(unsafe.Pointer(&ofn)))
+	if ret != 0 {
+		return syscall.UTF16ToString(fileBuf)
+	}
+	return ""
 }
 
 func getControlText(hEdit syscall.Handle) string {
@@ -153,9 +216,9 @@ func getControlText(hEdit syscall.Handle) string {
 func writeDefaultServerConfig() {
 	configMap := map[string]interface{}{
 		"server": map[string]interface{}{
-			"token":    "quick",
-			"edge-ips": []string{"198.41.192.77:7844", "198.41.197.78:7844"},
-			"ha-conn":  4,
+			"token":        "quick",
+			"edge-ips":     []string{"198.41.192.77:7844", "198.41.197.78:7844"},
+			"ha-conn":      4,
 			"bind-address": "",
 		},
 	}
@@ -182,6 +245,32 @@ func writeClientConfig(targetDomain string) {
 	_ = os.WriteFile("config.json", data, 0644)
 }
 
+// 联动外部软件启动 (最小化静默模式)
+func startAssociatedApp() {
+	if associatedExePath != "" && associatedCmd == nil {
+		log.Infoln("[System] Launching associated app (Minimized): %s", associatedExePath)
+		associatedCmd = exec.Command(associatedExePath)
+		associatedCmd.SysProcAttr = &syscall.SysProcAttr{
+			ShowWindow: 7, // SW_SHOWMINIMIZED
+		}
+		err := associatedCmd.Start()
+		if err != nil {
+			log.Errorln("[System] Failed to start associated app: %v", err)
+		} else {
+			log.Infoln("[System] Associated app started successfully (PID: %d).", associatedCmd.Process.Pid)
+		}
+	}
+}
+
+// 彻底终止外部软件进程
+func stopAssociatedApp() {
+	if associatedCmd != nil && associatedCmd.Process != nil {
+		log.Infoln("[System] Terminating associated app (PID: %d)...", associatedCmd.Process.Pid)
+		_ = associatedCmd.Process.Kill()
+		associatedCmd = nil
+	}
+}
+
 func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 	switch msg {
 	case WM_COMMAND:
@@ -202,6 +291,13 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 			procShowWindow.Call(uintptr(hInputLabel), 5) // SW_SHOW
 			procShowWindow.Call(uintptr(hInputEdit), 5)
 			procSetWindowText.Call(uintptr(hButtonStart), uintptr(unsafe.Pointer(textToUTF16("一键连接被控端 (TUN虚拟网卡模式)"))))
+		case IDC_BUTTON_CHOOSE:
+			path := OpenExeFileDialog(hWnd)
+			if path != "" {
+				associatedExePath = path
+				procSetWindowText.Call(uintptr(hExePathEdit), uintptr(unsafe.Pointer(textToUTF16(path))))
+				log.Infoln("[System] Associated executable set to: %s", path)
+			}
 		case IDC_BUTTON_COPY:
 			domain := getControlText(hDomainEdit)
 			if domain != "" {
@@ -221,12 +317,46 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 					writeClientConfig(domain)
 				}
 				isRunning = true
-				procSetWindowText.Call(uintptr(hButtonStart), uintptr(unsafe.Pointer(textToUTF16("加速引擎工作中..."))))
+				procSetWindowText.Call(uintptr(hButtonStart), uintptr(unsafe.Pointer(textToUTF16("正在建立连接..."))))
 				user32.NewProc("EnableWindow").Call(uintptr(hRadioServer), 0)
 				user32.NewProc("EnableWindow").Call(uintptr(hRadioClient), 0)
 				user32.NewProc("EnableWindow").Call(uintptr(hInputEdit), 0)
 				user32.NewProc("EnableWindow").Call(uintptr(hButtonStart), 0)
+				user32.NewProc("EnableWindow").Call(uintptr(hButtonChoose), 0)
+				user32.NewProc("EnableWindow").Call(uintptr(hButtonStop), 1) // 激活停止按钮
 				go runFunc()
+			}
+		case IDC_BUTTON_STOP:
+			if isRunning {
+				log.Infoln("[System] Closing tunnel and releasing system network resources...")
+				isRunning = false
+
+				// 1. 关闭所有本地监听端口，强行释放端口资源
+				for _, l := range ActiveListeners {
+					_ = l.Close()
+				}
+				ActiveListeners = nil
+				for _, pc := range ActivePacketConns {
+					_ = pc.Close()
+				}
+				ActivePacketConns = nil
+
+				// 2. 删除 TUN 虚拟网卡驱动
+				DeleteTunDevice("cftun0")
+
+				// 3. 同步彻底杀掉关联软件（如 TeamViewer）的后台实例
+				stopAssociatedApp()
+
+				// 4. 重置界面按钮状态，允许重新启动
+				procSetWindowText.Call(uintptr(hButtonStart), uintptr(unsafe.Pointer(textToUTF16("一键激活加速隧道"))))
+				user32.NewProc("EnableWindow").Call(uintptr(hRadioServer), 1)
+				user32.NewProc("EnableWindow").Call(uintptr(hRadioClient), 1)
+				user32.NewProc("EnableWindow").Call(uintptr(hInputEdit), 1)
+				user32.NewProc("EnableWindow").Call(uintptr(hButtonStart), 1)
+				user32.NewProc("EnableWindow").Call(uintptr(hButtonChoose), 1)
+				user32.NewProc("EnableWindow").Call(uintptr(hButtonStop), 0) // 禁用停止按钮
+
+				log.Infoln("[System] Engine stopped successfully. Ready for next connection.")
 			}
 		case IDC_CHECK_ADVANCED:
 			checkState, _, _ := user32.NewProc("SendMessageW").Call(uintptr(hCheckAdvanced), BM_GETCHECK, 0, 0)
@@ -239,6 +369,8 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 			}
 		}
 	case WM_DESTROY:
+		stopAssociatedApp()
+		DeleteTunDevice("cftun0")
 		syscall.ExitProcess(0)
 	default:
 		ret, _, _ := procDefWindow.Call(uintptr(hWnd), uintptr(msg), wParam, lParam)
@@ -261,6 +393,11 @@ func WriteLogToGui(text string) {
 				domain := strings.TrimSpace(parts[1])
 				procSetWindowText.Call(uintptr(hDomainEdit), uintptr(unsafe.Pointer(textToUTF16(domain))))
 			}
+		}
+
+		// 联动启动：一旦底层网络完全连通（即接收到 Connected / Tunnel / Stack 提示），自动拉起关联 exe
+		if strings.Contains(cleanText, "[Tunnel] Connected successfully") || strings.Contains(cleanText, "[STACK] tun://") {
+			go startAssociatedApp()
 		}
 
 		utf16Text := textToUTF16(cleanText + "\r\n")
@@ -304,96 +441,128 @@ func StartWindowsGUI(onStart func()) {
 		uintptr(unsafe.Pointer(className)),
 		uintptr(unsafe.Pointer(textToUTF16("CFTUN 远程桌面专属加速控制面板"))),
 		WS_OVERLAPPEDWINDOW|WS_VISIBLE,
-		100, 100, 620, 520,
+		100, 100, 640, 580, // 大号美化窗口尺寸
 		0, 0, hInstance, 0,
 	)
 	hMainWindow = syscall.Handle(hMainVal)
 
-	hFont, _, _ := gdi32.NewProc("CreateFontW").Call(
-		15, 0, 0, 0, 400, 0, 0, 0,
+	// 大号美化字体
+	hFontNormal, _, _ := gdi32.NewProc("CreateFontW").Call(
+		16, 0, 0, 0, 400, 0, 0, 0,
+		1, 0, 0, 0, 0,
+		uintptr(unsafe.Pointer(textToUTF16("Microsoft YaHei"))),
+	)
+	hFontBold, _, _ := gdi32.NewProc("CreateFontW").Call(
+		18, 0, 0, 0, 700, 0, 0, 0,
 		1, 0, 0, 0, 0,
 		uintptr(unsafe.Pointer(textToUTF16("Microsoft YaHei"))),
 	)
 
-	// 1. 创建角色单选框
+	// 1. 加速模式选择
 	hGrpRoleVal, _, _ := procCreateWindow.Call(
 		0, uintptr(unsafe.Pointer(textToUTF16("BUTTON"))), uintptr(unsafe.Pointer(textToUTF16("加速模式选择"))),
-		WS_CHILD|WS_VISIBLE|0x0007, 10, 10, 580, 60, hMainVal, 0, hInstance, 0, // BS_GROUPBOX
+		WS_CHILD|WS_VISIBLE|0x0007, 10, 10, 600, 65, hMainVal, 0, hInstance, 0,
 	)
-	hGrpRole := syscall.Handle(hGrpRoleVal) // 核心修复：转化为统一的 Handle 避开类型校验冲突
+	hGrpRole := syscall.Handle(hGrpRoleVal)
 
 	hRadioServerVal, _, _ := procCreateWindow.Call(
 		0, uintptr(unsafe.Pointer(textToUTF16("BUTTON"))), uintptr(unsafe.Pointer(textToUTF16("我是被控端 (服务端)"))),
-		WS_CHILD|WS_VISIBLE|0x0009, 25, 30, 200, 30, hMainVal, IDC_RADIO_SERVER, hInstance, 0, // BS_AUTORADIOBUTTON
+		WS_CHILD|WS_VISIBLE|0x0009, 25, 32, 200, 30, hMainVal, IDC_RADIO_SERVER, hInstance, 0,
 	)
 	hRadioServer = syscall.Handle(hRadioServerVal)
 
 	hRadioClientVal, _, _ := procCreateWindow.Call(
 		0, uintptr(unsafe.Pointer(textToUTF16("BUTTON"))), uintptr(unsafe.Pointer(textToUTF16("我是控制端 (客户端-网卡模式)"))),
-		WS_CHILD|WS_VISIBLE|0x0009, 260, 30, 260, 30, hMainVal, IDC_RADIO_CLIENT, hInstance, 0,
+		WS_CHILD|WS_VISIBLE|0x0009, 260, 32, 300, 30, hMainVal, IDC_RADIO_CLIENT, hInstance, 0,
 	)
 	hRadioClient = syscall.Handle(hRadioClientVal)
 
-	// 2. 被控端域名看板组件
+	// 2. 被控端域名看板
 	hDomainLabelVal, _, _ := procCreateWindow.Call(
 		0, uintptr(unsafe.Pointer(textToUTF16("STATIC"))), uintptr(unsafe.Pointer(textToUTF16("您的临时加速域名 (一键复制)："))),
-		WS_CHILD|WS_VISIBLE, 15, 85, 230, 20, hMainVal, 0, hInstance, 0,
+		WS_CHILD|WS_VISIBLE, 15, 95, 230, 25, hMainVal, 0, hInstance, 0,
 	)
 	hDomainLabel = syscall.Handle(hDomainLabelVal)
 
 	hDomainEditVal, _, _ := procCreateWindow.Call(
 		0x00000200, uintptr(unsafe.Pointer(textToUTF16("EDIT"))), 0,
-		WS_CHILD|WS_VISIBLE|0x0800, 240, 80, 250, 25, hMainVal, 0, hInstance, 0, // ES_READONLY
+		WS_CHILD|WS_VISIBLE|0x0800, 240, 90, 250, 32, hMainVal, 0, hInstance, 0,
 	)
 	hDomainEdit = syscall.Handle(hDomainEditVal)
 
 	hButtonCopyVal, _, _ := procCreateWindow.Call(
 		0, uintptr(unsafe.Pointer(textToUTF16("BUTTON"))), uintptr(unsafe.Pointer(textToUTF16("复制域名"))),
-		WS_CHILD|WS_VISIBLE, 500, 78, 90, 28, hMainVal, IDC_BUTTON_COPY, hInstance, 0,
+		WS_CHILD|WS_VISIBLE, 500, 88, 100, 32, hMainVal, IDC_BUTTON_COPY, hInstance, 0,
 	)
 	hButtonCopy = syscall.Handle(hButtonCopyVal)
 
-	// 3. 控制端域名输入组件 (默认隐藏)
+	// 3. 控制端输入组件 (默认隐藏)
 	hInputLabelVal, _, _ := procCreateWindow.Call(
 		0, uintptr(unsafe.Pointer(textToUTF16("STATIC"))), uintptr(unsafe.Pointer(textToUTF16("请输入被控端的临时域名："))),
-		WS_CHILD, 15, 85, 200, 20, hMainVal, 0, hInstance, 0,
+		WS_CHILD, 15, 95, 220, 25, hMainVal, 0, hInstance, 0,
 	)
 	hInputLabel = syscall.Handle(hInputLabelVal)
 
 	hInputEditVal, _, _ := procCreateWindow.Call(
 		0x00000200, uintptr(unsafe.Pointer(textToUTF16("EDIT"))), 0,
-		WS_CHILD|0x0080, 240, 80, 350, 25, hMainVal, 0, hInstance, 0, // ES_AUTOHSCROLL
+		WS_CHILD|0x0080, 240, 90, 350, 32, hMainVal, 0, hInstance, 0,
 	)
 	hInputEdit = syscall.Handle(hInputEditVal)
 
-	// 4. 控制激活大按钮与高级设置
+	// 4. 关联启动 EXE 选择组件
+	hButtonChooseVal, _, _ := procCreateWindow.Call(
+		0, uintptr(unsafe.Pointer(textToUTF16("BUTTON"))), uintptr(unsafe.Pointer(textToUTF16("选择要关联启动的软件 (.exe)"))),
+		WS_CHILD|WS_VISIBLE, 10, 135, 260, 35, hMainVal, IDC_BUTTON_CHOOSE, hInstance, 0,
+	)
+	hButtonChoose = syscall.Handle(hButtonChooseVal)
+
+	hExePathEditVal, _, _ := procCreateWindow.Call(
+		0x00000200, uintptr(unsafe.Pointer(textToUTF16("EDIT"))), 0,
+		WS_CHILD|WS_VISIBLE|0x0800, 280, 137, 330, 30, hMainVal, 0, hInstance, 0,
+	)
+	hExePathEdit = syscall.Handle(hExePathEditVal)
+
+	// 5. 控制按钮组：一键开启 与 停止
 	hButtonStartVal, _, _ := procCreateWindow.Call(
-		0, uintptr(unsafe.Pointer(textToUTF16("BUTTON"))), uintptr(unsafe.Pointer(textToUTF16("开启被控端 (生成临时隧道)"))),
-		WS_CHILD|WS_VISIBLE, 10, 125, 580, 50, hMainVal, IDC_BUTTON_START, hInstance, 0,
+		0, uintptr(unsafe.Pointer(textToUTF16("BUTTON"))), uintptr(unsafe.Pointer(textToUTF16("一键开启加速"))),
+		WS_CHILD|WS_VISIBLE, 10, 185, 285, 60, hMainVal, IDC_BUTTON_START, hInstance, 0,
 	)
 	hButtonStart = syscall.Handle(hButtonStartVal)
 
+	hButtonStopVal, _, _ := procCreateWindow.Call(
+		0, uintptr(unsafe.Pointer(textToUTF16("BUTTON"))), uintptr(unsafe.Pointer(textToUTF16("停止加速"))),
+		WS_CHILD|WS_VISIBLE, 315, 185, 285, 60, hMainVal, IDC_BUTTON_STOP, hInstance, 0,
+	)
+	hButtonStop = syscall.Handle(hButtonStopVal)
+	user32.NewProc("EnableWindow").Call(uintptr(hButtonStop), 0) // 默认未开启时禁用“停止”
+
 	hCheckAdvancedVal, _, _ := procCreateWindow.Call(
 		0, uintptr(unsafe.Pointer(textToUTF16("BUTTON"))), uintptr(unsafe.Pointer(textToUTF16("高级设置：显示底层全量 Debug 日志"))),
-		WS_CHILD|WS_VISIBLE|0x0003, 10, 185, 300, 20, hMainVal, IDC_CHECK_ADVANCED, hInstance, 0, // BS_AUTOCHECKBOX
+		WS_CHILD|WS_VISIBLE|0x0003, 10, 250, 350, 25, hMainVal, IDC_CHECK_ADVANCED, hInstance, 0,
 	)
 	hCheckAdvanced = syscall.Handle(hCheckAdvancedVal)
 
-	// 5. 日志监视编辑框
+	// 6. 日志监视编辑框 (高度略有调整，为上方留空)
 	hLogBoxVal, _, _ := procCreateWindow.Call(
 		0x00000200, uintptr(unsafe.Pointer(textToUTF16("EDIT"))), 0,
 		WS_CHILD|WS_VISIBLE|ES_MULTILINE|ES_AUTOVSCROLL|WS_VSCROLL|0x0800,
-		10, 215, 580, 250, hMainVal, 0, hInstance, 0,
+		10, 280, 600, 240, hMainVal, 0, hInstance, 0,
 	)
 	hLogBox = syscall.Handle(hLogBoxVal)
 
 	// 默认勾选被控端 Radio
 	user32.NewProc("SendMessageW").Call(uintptr(hRadioServer), BM_SETCHECK, 1, 0)
 
-	// 全员应用“微软雅黑”美化字体
-	allControls := []syscall.Handle{hGrpRole, hRadioServer, hRadioClient, hDomainLabel, hDomainEdit, hButtonCopy, hInputLabel, hInputEdit, hButtonStart, hCheckAdvanced, hLogBox}
-	for _, ctrl := range allControls {
-		user32.NewProc("SendMessageW").Call(uintptr(ctrl), 0x0030, uintptr(hFont), 1) // WM_SETFONT
+	// 应用“微软雅黑-普通”字体
+	allNormalControls := []syscall.Handle{hGrpRole, hRadioServer, hRadioClient, hDomainLabel, hInputLabel, hCheckAdvanced, hLogBox, hButtonChoose, hExePathEdit}
+	for _, ctrl := range allNormalControls {
+		user32.NewProc("SendMessageW").Call(uintptr(ctrl), 0x0030, uintptr(hFontNormal), 1)
+	}
+
+	// 应用“微软雅黑-加粗”字体 (大按钮与文本框)
+	allBoldControls := []syscall.Handle{hDomainEdit, hButtonCopy, hInputEdit, hButtonStart, hButtonStop}
+	for _, ctrl := range allBoldControls {
+		user32.NewProc("SendMessageW").Call(uintptr(ctrl), 0x0030, uintptr(hFontBold), 1)
 	}
 
 	go func() {
