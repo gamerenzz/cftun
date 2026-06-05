@@ -10,7 +10,6 @@ import (
 
 var (
 	user32           = syscall.NewLazyDLL("user32.dll")
-	gdi32            = syscall.NewLazyDLL("gdi32.dll")
 	kernel32         = syscall.NewLazyDLL("kernel32.dll")
 	procCreateWindow = user32.NewProc("CreateWindowExW")
 	procDefWindow    = user32.NewProc("DefWindowProcW")
@@ -30,6 +29,10 @@ const (
 	WS_VSCROLL          = 0x00200000
 	WM_COMMAND          = 0x0111
 	WM_DESTROY          = 0x0002
+
+	// Win32 Edit 控件追加消息，规避死锁
+	EM_SETSEL     = 0x00B1
+	EM_REPLACESEL = 0x00C2
 )
 
 type WNDCLASSEXW struct {
@@ -87,14 +90,14 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 	return 0
 }
 
+// WriteLogToGui 采用高效、无死锁的 EM_SETSEL + EM_REPLACESEL 机制在末尾追加日志
 func WriteLogToGui(text string) {
 	if hLogBox != 0 {
-		currentText := make([]uint16, 32768)
-		user32.NewProc("GetWindowTextW").Call(uintptr(hLogBox), uintptr(unsafe.Pointer(&currentText[0])), 32768)
-		existing := syscall.UTF16ToString(currentText)
-		updated := existing + text + "\r\n"
-		procSetWindowText.Call(uintptr(hLogBox), uintptr(unsafe.Pointer(textToUTF16(updated))))
-		user32.NewProc("SendMessageW").Call(uintptr(hLogBox), 0x00B6, 0, uintptr(1000))
+		utf16Text := textToUTF16(text + "\r\n")
+		// 将编辑框的光标移到最后
+		user32.NewProc("SendMessageW").Call(uintptr(hLogBox), EM_SETSEL, uintptr(0xFFFFFFFF), uintptr(0xFFFFFFFF))
+		// 在当前光标（即末尾）直接追加文本，避免读取和全选，彻底防止界面挂起
+		user32.NewProc("SendMessageW").Call(uintptr(hLogBox), EM_REPLACESEL, uintptr(0), uintptr(unsafe.Pointer(utf16Text)))
 	}
 }
 
@@ -108,7 +111,7 @@ func StartWindowsGUI(onStart func()) {
 		LpfnWndProc:   syscall.NewCallback(wndProc),
 		HInstance:     syscall.Handle(hInstance),
 		HbrBackground: syscall.Handle(5), // COLOR_WINDOW
-		LpszClassName: className,
+		wc.LpszClassName: className,
 	}
 	wc.CbSize = uint32(unsafe.Sizeof(wc))
 	procRegisterClass.Call(uintptr(unsafe.Pointer(&wc)))
