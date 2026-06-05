@@ -24,6 +24,11 @@ func (a *Argo) Host() string {
 	return a.ws.Address
 }
 
+// MigratePools 提供给上层质量监控引擎的一键链路热迁移接口
+func (a *Argo) MigratePools() {
+	a.ws.ForceResetPools()
+}
+
 func NewArgo(params *argo.Params) *Argo {
 	return &Argo{
 		ws: argo.NewWebsocket(params),
