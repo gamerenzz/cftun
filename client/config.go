@@ -29,7 +29,7 @@ type Config struct {
 	Tun       *Tun      `yaml:"tun" json:"tun"`
 }
 
-var defaultCfIps = []string{
+var fallbackCfIps = []string{
 	"104.16.123.96", "104.17.143.163", "104.16.249.249",
 	"162.159.192.1", "108.162.192.1", "172.64.161.11",
 }
@@ -42,25 +42,38 @@ type ProbeResult struct {
 }
 
 func (p *ProbeResult) Score() float64 {
-	// RTT占40%, 丢包占40%, 抖动占20% (远程控制场景最核心指标)
 	return float64(p.RTT.Milliseconds())*0.4 + p.Loss*1000.0*0.4 + float64(p.Jitter.Milliseconds())*0.2
 }
 
-// SelectBestIP 执行高精度的并发链路评分探测
-func SelectBestIP() string {
-	log.Infoln("[Optimizer] Rerouting initiated. Probing Cloudflare nodes...")
+// SelectBestIP 升级为动态解析目标域名 IP 池，彻底杜绝 530 边缘节点拒绝服务
+func SelectBestIP(globalUrl string) string {
+	log.Infoln("[Optimizer] Rerouting initiated. Detecting official anycast IPs...")
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	bestIP := defaultCfIps[0]
+
+	host := strings.Split(globalUrl, "/")[0]
+	// 动态查找该域名在 Cloudflare 官方对应的 Anycast 节点列表
+	resolvedIps, err := net.LookupHost(host)
+
+	var ipPool []string
+	if err == nil && len(resolvedIps) > 0 {
+		log.Infoln("[Optimizer] DNS resolved official IPs for routing: %v", resolvedIps)
+		ipPool = resolvedIps
+	} else {
+		log.Warnln("[Optimizer] DNS lookup failed. Falling back to default IP pool.")
+		ipPool = fallbackCfIps
+	}
+
+	bestIP := ipPool[0]
 	minScore := 999999.0
 
-	for _, ip := range defaultCfIps {
+	for _, ip := range ipPool {
 		wg.Add(1)
 		go func(target string) {
 			defer wg.Done()
 			var rtts []time.Duration
 			successCount := 0
-			probeTimes := 5 // 每个节点测试5次获取抖动与丢包
+			probeTimes := 5
 
 			for i := 0; i < probeTimes; i++ {
 				start := time.Now()
@@ -77,7 +90,6 @@ func SelectBestIP() string {
 				return
 			}
 
-			// 计算 RTT, Jitter, Loss
 			var sum int64
 			for _, r := range rtts {
 				sum += r.Milliseconds()
@@ -118,13 +130,13 @@ func SelectBestIP() string {
 		}(ip)
 	}
 	wg.Wait()
-	log.Infoln("[Optimizer] Route decided. Best Node: %s (Rank Score: %.2f)", bestIP, minScore)
+	log.Infoln("[Optimizer] Dynamic selection completed. Safest Best Node: %s (Rank Score: %.2f)", bestIP, minScore)
 	return bestIP
 }
 
 func (c *Config) Run() {
 	if c.CdnIp == "" || c.CdnIp == "auto" {
-		c.CdnIp = SelectBestIP()
+		c.CdnIp = SelectBestIP(c.GlobalUrl)
 	}
 
 	if c.Tun != nil && c.Tun.Enable {
@@ -186,4 +198,3 @@ func (c *Config) getScheme() string {
 		return "wss"
 	}
 }
-
