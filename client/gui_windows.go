@@ -7,11 +7,9 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
-	"time"
 	"unsafe"
 
 	"github.com/fmnx/cftun/log"
-	"golang.org/x/sys/windows"
 )
 
 var (
@@ -131,7 +129,12 @@ func CopyToClipboard(text string) {
 	user32.NewProc("EmptyClipboard").Call()
 	hMem, _, _ := kernel32.NewProc("GlobalAlloc").Call(0x0002, uintptr(textLen*2+2)) // GMEM_MOVEABLE
 	ptr, _, _ := kernel32.NewProc("GlobalLock").Call(hMem)
-	windows.MoveMemory(windows.Pointer(ptr), windows.Pointer(unsafe.Pointer(&utf16[0])), uintptr(textLen*2+2))
+	
+	// 核心修复：采用 Go 1.17+ 原生的切片转换进行无损、安全的底层 C-指针内存拷贝
+	destSlice := unsafe.Slice((*uint16)(unsafe.Pointer(ptr)), textLen+1)
+	srcSlice := unsafe.Slice(utf16, textLen+1)
+	copy(destSlice, srcSlice)
+	
 	kernel32.NewProc("GlobalUnlock").Call(hMem)
 	user32.NewProc("SetClipboardData").Call(13, hMem) // CF_UNICODETEXT
 	user32.NewProc("CloseClipboard").Call()
@@ -248,12 +251,10 @@ func WriteLogToGui(text string) {
 	if hLogBox != 0 {
 		cleanText := stripANSI(text)
 
-		// 过滤调试级日志 (默认关闭，提升纯净度)
 		if !showAllLogs && strings.Contains(cleanText, "[DEBUG]") {
 			return
 		}
 
-		// 提取临时域名直接投射到顶部的域名面板中
 		if strings.Contains(cleanText, "THE TEMPORARY DOMAIN YOU HAVE APPLIED FOR IS:") {
 			parts := strings.Split(cleanText, "IS: ")
 			if len(parts) > 1 {
@@ -268,7 +269,6 @@ func WriteLogToGui(text string) {
 	}
 }
 
-// CheckSingleInstance 防多开引擎：若已启动则拉起老窗口并静默退出
 func CheckSingleInstance() bool {
 	hOld, _, _ := procFindWindow.Call(uintptr(unsafe.Pointer(textToUTF16("CFTUN_GUI_CLASS"))), 0)
 	if hOld != 0 {
@@ -280,7 +280,6 @@ func CheckSingleInstance() bool {
 }
 
 func StartWindowsGUI(onStart func()) {
-	// 进程防重叠单开锁
 	if CheckSingleInstance() {
 		syscall.ExitProcess(0)
 	}
@@ -310,7 +309,6 @@ func StartWindowsGUI(onStart func()) {
 	)
 	hMainWindow = syscall.Handle(hMainVal)
 
-	// 微软雅黑美化字体句柄
 	hFont, _, _ := gdi32.NewProc("CreateFontW").Call(
 		15, 0, 0, 0, 400, 0, 0, 0,
 		1, 0, 0, 0, 0,
@@ -318,10 +316,11 @@ func StartWindowsGUI(onStart func()) {
 	)
 
 	// 1. 创建角色单选框
-	hGrpRole, _, _ := procCreateWindow.Call(
+	hGrpRoleVal, _, _ := procCreateWindow.Call(
 		0, uintptr(unsafe.Pointer(textToUTF16("BUTTON"))), uintptr(unsafe.Pointer(textToUTF16("加速模式选择"))),
 		WS_CHILD|WS_VISIBLE|0x0007, 10, 10, 580, 60, hMainVal, 0, hInstance, 0, // BS_GROUPBOX
 	)
+	hGrpRole := syscall.Handle(hGrpRoleVal) // 核心修复：转化为统一的 Handle 避开类型校验冲突
 
 	hRadioServerVal, _, _ := procCreateWindow.Call(
 		0, uintptr(unsafe.Pointer(textToUTF16("BUTTON"))), uintptr(unsafe.Pointer(textToUTF16("我是被控端 (服务端)"))),
@@ -337,7 +336,7 @@ func StartWindowsGUI(onStart func()) {
 
 	// 2. 被控端域名看板组件
 	hDomainLabelVal, _, _ := procCreateWindow.Call(
-		0, uintptr(unsafe.Pointer(textToUTF16("STATIC"))), uintptr(unsafe.Pointer(textToUTF16("您的临时加速域名 (双击复制)："))),
+		0, uintptr(unsafe.Pointer(textToUTF16("STATIC"))), uintptr(unsafe.Pointer(textToUTF16("您的临时加速域名 (一键复制)："))),
 		WS_CHILD|WS_VISIBLE, 15, 85, 230, 20, hMainVal, 0, hInstance, 0,
 	)
 	hDomainLabel = syscall.Handle(hDomainLabelVal)
@@ -380,7 +379,7 @@ func StartWindowsGUI(onStart func()) {
 	)
 	hCheckAdvanced = syscall.Handle(hCheckAdvancedVal)
 
-	// 5. 日志监视编辑框 (转移到最下方，留足看板空间)
+	// 5. 日志监视编辑框
 	hLogBoxVal, _, _ := procCreateWindow.Call(
 		0x00000200, uintptr(unsafe.Pointer(textToUTF16("EDIT"))), 0,
 		WS_CHILD|WS_VISIBLE|ES_MULTILINE|ES_AUTOVSCROLL|WS_VSCROLL|0x0800,
