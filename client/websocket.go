@@ -67,21 +67,54 @@ func NewWebsocket(config *Config, tunnel *Tunnel) *Websocket {
 		url:      fmt.Sprintf("%s://%s", config.getScheme(), tunnel.Url),
 	}
 
-	go ws.monitorFailoverLoop()
+	// 启动链路质量动态评估与漂移引擎
+	go ws.monitorLinkQualityAndFailover()
 	return ws
 }
 
-func (w *Websocket) monitorFailoverLoop() {
-	ticker := time.NewTicker(3 * time.Second)
+// monitorLinkQualityAndFailover 动态采集 RTT、抖动、丢包，给出实时链路评级，并自动漂移不良链路
+func (w *Websocket) monitorLinkQualityAndFailover() {
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
+	var lastLatency int64
+
 	for range ticker.C {
+		if !isRunning {
+			continue
+		}
+
 		latency := w.latencyValue.Load()
 		loss := w.lossCounter.Load()
 
-		if (latency > 200) || (loss > 3) {
-			log.Warnln("[Failover] Channel quality degraded (RTT: %dms, LossMetric: %d). Performing preventive switchover...", latency, loss)
+		if latency == 0 {
+			continue
+		}
+
+		// 计算即时网络抖动 (Jitter)
+		jitter := latency - lastLatency
+		if jitter < 0 {
+			jitter = -jitter
+		}
+		lastLatency = latency
+
+		// 链路质量动态评分系统 (Link Quality Rating)
+		rating := "Excellent (极佳)"
+		if latency > 180 || loss > 1 || jitter > 25 {
+			rating = "Good (良好)"
+		}
+		if latency > 250 || loss > 2 || jitter > 50 {
+			rating = "Poor (较差)"
+		}
+
+		log.Infoln("[Monitor] Active Tunnel Status: RTT: %dms | Jitter: %dms | LossMetric: %d | Rating: %s",
+			latency, jitter, loss, rating)
+
+		// P2 预防性主动漂移触发判定：若链路评级退化为 "较差"，提前静默重组连接，保障远程桌面不发生任何卡顿
+		if rating == "Poor (较差)" {
+			log.Warnln("[Failover] Quality degraded to Poor. Initiating preventive anycast rerouting...")
 			w.lossCounter.Store(0)
+			w.latencyValue.Store(0)
 			newIP := SelectBestIP(w.config.GlobalUrl)
 			w.config.CdnIp = newIP
 		}
@@ -103,7 +136,7 @@ func (w *Websocket) createWebsocketStream() (net.Conn, error) {
 			_ = resp.Body.Close()
 		}
 		
-		// 故障漂移，传递域名引导精确定向
+		// 故障漂移
 		w.config.CdnIp = SelectBestIP(w.config.GlobalUrl)
 		wsConn, resp, err = w.wsDialer.Dial(w.url, w.headers)
 		if err != nil {
