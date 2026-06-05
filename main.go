@@ -100,7 +100,6 @@ func runCoreEngine() {
 		if s.Token == "quick" {
 			isQuick = true
 		}
-		// 将 GetBuildInfo 内联传参，不声明局部变量
 		go s.Run(server.GetBuildInfo(BuildType, CloudflaredVersion), quickData)
 	}
 }
@@ -115,6 +114,13 @@ func main() {
 	if showVersion {
 		printVersion()
 		return
+	}
+
+	// 核心安全升级：在 Windows 环境下强制拦截防双开/多开冲突
+	if runtime.GOOS == "windows" {
+		if client.CheckSingleInstance() {
+			syscall.ExitProcess(0)
+		}
 	}
 
 	// 判断 Windows 环境下是否直接双击启动 (没有任何命令行参数)
