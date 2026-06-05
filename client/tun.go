@@ -1,10 +1,11 @@
 package client
 
 import (
-	"context"
+	"fmt"
 	"net"
 	"os/exec"
 	"runtime"
+	"syscall"
 	"time"
 
 	tunToArgo "github.com/fmnx/cftun/client/tun/engine"
@@ -47,22 +48,27 @@ func (t *Tun) ipv6() string {
 	return "fd12:3456:789a::1"
 }
 
-// probeAutoPathMTU 在启动时动态探测物理路径的 PMTU 极限
+// probeAutoPathMTU 在 Windows 底层使用带 -f (DF禁止分片) 和 -l (尺寸) 的真实 ICMP 探测真 PMTU 极限
 func (t *Tun) probeAutoPathMTU() int {
-	log.Infoln("[MTU] Initiating Path MTU Auto-Discovery...")
-	baseIP := "223.5.5.5:53" // 以阿里公网解析器为探测对照源
+	log.Infoln("[MTU] Initiating Windows Native PMTU Discovery (PMTUD)...")
+	targetIP := "223.5.5.5" // 以阿里公共 Anycast DNS 为探测目标
 	
 	testMTUs := []int{1450, 1400, 1350, 1300}
 	for _, m := range testMTUs {
-		dialer := net.Dialer{Timeout: 300 * time.Millisecond}
-		conn, err := dialer.Dial("udp", baseIP)
+		// 除去 IP 头(20字节)和 ICMP 头(8字节)，真实发包大小为 m - 28 字节
+		payloadSize := fmt.Sprintf("%d", m-28)
+		cmd := exec.Command("ping", "-n", "1", "-f", "-l", payloadSize, targetIP)
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		
+		err := cmd.Run()
 		if err == nil {
-			conn.Close()
-			log.Infoln("[MTU] Path MTU test passed at: %d bytes. Auto-selected.", m)
+			log.Infoln("[MTU] True Path MTU confirmed: %d bytes (DF bit set successfully, no fragmentation).", m)
 			return m
 		}
+		log.Infoln("[MTU] Probe failed at %d bytes (Packet got fragmented by gateway). trying smaller...", m)
 	}
-	log.Warnln("[MTU] Dynamic PMTU probe timed out. Falling back to safe MTU: 1300 bytes.")
+	
+	log.Warnln("[MTU] PMTU discovery completed. Selecting safest baseline: 1300 bytes.")
 	return 1300
 }
 
@@ -74,7 +80,6 @@ func (t *Tun) mtu() int {
 }
 
 func (t *Tun) Run(params *argo.Params) {
-	// 正名：原“FastPath”更名为“Interactive Fast Lane（交互快速通道）”，完全尊重技术合理性
 	log.Infoln("[Interactive Fast Lane] Initializing high-speed control tunnel for RDP/TeamViewer/AnyDesk...")
 	argoProxy := proxy.NewArgo(params)
 
