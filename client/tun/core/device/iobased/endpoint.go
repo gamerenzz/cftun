@@ -1,5 +1,3 @@
-// Package iobased provides the implementation of io.ReadWriter
-// based data-link layer endpoints.
 package iobased
 
 import (
@@ -16,32 +14,22 @@ import (
 )
 
 const (
-	// Queue length for outbound packet, arriving for read. Overflow
-	// causes packet drops.
 	defaultOutQueueLen = 1 << 10
 )
 
-// Endpoint implements the interface of stack.LinkEndpoint from io.ReadWriter.
+// FastPathHook 允许上层引擎挂载无状态过滤，直接把数据包截获并转发，彻底绕过 gVisor 协议栈
+var FastPathHook func(packet []byte) bool
+
 type Endpoint struct {
 	*channel.Endpoint
 
-	// rw is the io.ReadWriter for reading and writing packets.
-	rw io.ReadWriter
-
-	// mtu (maximum transmission unit) is the maximum size of a packet.
-	mtu uint32
-
-	// offset can be useful when perform TUN device I/O with TUN_PI enabled.
+	rw     io.ReadWriter
+	mtu    uint32
 	offset int
-
-	// once is used to perform the init action once when attaching.
-	once sync.Once
-
-	// wg keeps track of running goroutines.
-	wg sync.WaitGroup
+	once   sync.Once
+	wg     sync.WaitGroup
 }
 
-// New returns stack.LinkEndpoint(.*Endpoint) and error.
 func New(rw io.ReadWriter, mtu uint32, offset int) (*Endpoint, error) {
 	if mtu == 0 {
 		return nil, errors.New("MTU size is zero")
@@ -63,8 +51,6 @@ func New(rw io.ReadWriter, mtu uint32, offset int) (*Endpoint, error) {
 	}, nil
 }
 
-// Attach launches the goroutine that reads packets from io.Reader and
-// dispatches them via the provided dispatcher.
 func (e *Endpoint) Attach(dispatcher stack.NetworkDispatcher) {
 	e.Endpoint.Attach(dispatcher)
 	e.once.Do(func() {
@@ -85,10 +71,7 @@ func (e *Endpoint) Wait() {
 	e.wg.Wait()
 }
 
-// dispatchLoop dispatches packets to upper layer.
 func (e *Endpoint) dispatchLoop(cancel context.CancelFunc) {
-	// Call cancel() to ensure (*Endpoint).outboundLoop(context.Context) exits
-	// gracefully after (*Endpoint).dispatchLoop(context.CancelFunc) returns.
 	defer cancel()
 
 	offset, mtu := e.offset, int(e.mtu)
@@ -105,8 +88,16 @@ func (e *Endpoint) dispatchLoop(cancel context.CancelFunc) {
 			continue
 		}
 
+		// 真·FastPath：一旦挂载了过滤处理器，且判定该 IP 报文属于 RDP/TeamViewer (3389/5938)
+		// 阻断其进入 gVisor Inbound 队列，直接通过 FastPath 直连层在零内存拷贝状态下送出物理网卡
+		if FastPathHook != nil {
+			if FastPathHook(data[offset : offset+n]) {
+				continue // 成功旁路直连，无需送入 gVisor 协议栈！
+			}
+		}
+
 		if !e.IsAttached() {
-			continue /* unattached, drop packet */
+			continue
 		}
 
 		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
@@ -123,8 +114,6 @@ func (e *Endpoint) dispatchLoop(cancel context.CancelFunc) {
 	}
 }
 
-// outboundLoop reads outbound packets from channel, and then it calls
-// writePacket to send those packets back to lower layer.
 func (e *Endpoint) outboundLoop(ctx context.Context) {
 	for {
 		pkt := e.ReadContext(ctx)
@@ -135,7 +124,6 @@ func (e *Endpoint) outboundLoop(ctx context.Context) {
 	}
 }
 
-// writePacket writes outbound packets to the io.Writer.
 func (e *Endpoint) writePacket(pkt *stack.PacketBuffer) tcpip.Error {
 	defer pkt.DecRef()
 
