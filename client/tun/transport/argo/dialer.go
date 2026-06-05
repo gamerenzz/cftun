@@ -38,6 +38,7 @@ type Websocket struct {
 	stopChan  chan struct{}
 	connPool  chan net.Conn
 
+	// 真·高活性控制交互连接池（常备 4 个完全就绪连接）
 	interactivePool chan net.Conn
 }
 
@@ -77,7 +78,40 @@ func NewWebsocket(params *Params) *Websocket {
 		connPool:        make(chan net.Conn, params.PoolSize),
 		interactivePool: make(chan net.Conn, 4),
 	}
+
+	// 启动时，主动在后台预热建立 4 个高活性控制专用连接，消灭建连延迟
+	go ws.preWarmInteractivePool()
 	return ws
+}
+
+// 预热 4 条完全就绪的 WSS 链路，随时待命
+func (w *Websocket) preWarmInteractivePool() {
+	log.Infoln("[Optimizer] Pre-warming 4 high-speed interactive WebSocket streams to Cloudflare...")
+	for i := 0; i < 4; i++ {
+		go func() {
+			conn, err := w.connect(nil)
+			if err == nil {
+				select {
+				case w.interactivePool <- conn:
+					// 成功置入常备队列
+				default:
+					_ = conn.Close()
+				}
+			}
+		}()
+	}
+}
+
+// 自动补货机制，维持 4 个常备就绪连接的动态平衡
+func (w *Websocket) replenishInteractive() {
+	conn, err := w.connect(nil)
+	if err == nil {
+		select {
+		case w.interactivePool <- conn:
+		default:
+			_ = conn.Close()
+		}
+	}
 }
 
 func (w *Websocket) Close() {
@@ -123,8 +157,6 @@ func (w *Websocket) header(metadata *metadata.Metadata) http.Header {
 	header.Set("Host", w.headers.Get("Host"))
 	header.Set("User-Agent", w.headers.Get("User-Agent"))
 
-	// 核心架构升级：如果是虚拟网卡中继路由产生的 IP 流量（如 198.18.x.x）
-	// 被控端本地无法寻路，因此客户端自动将其重写为 127.0.0.1 转发给被控端本地回环
 	destAddr := metadata.DestinationAddress()
 	if strings.HasPrefix(destAddr, "198.18.") || strings.HasPrefix(destAddr, "192.168.123.") {
 		_, port, err := net.SplitHostPort(destAddr)
@@ -163,11 +195,15 @@ func (w *Websocket) connect(metadata *metadata.Metadata) (net.Conn, error) {
 func (w *Websocket) Dial(metadata *metadata.Metadata) (conn net.Conn, headerSent bool, err error) {
 	defer func() { go w.preDial() }()
 
+	// 真正的预连接调度：控制小包流在 0 毫秒内瞬间取用已经建立好并完成握手的常备连接！
 	if metadata != nil && (metadata.Network.String() == "udp" || metadata.DstPort == 5938 || metadata.DstPort == 3389) {
 		select {
 		case conn = <-w.interactivePool:
+			// 自动异步补货，确保池子里永远有 4 个待命
+			go w.replenishInteractive()
 			return conn, false, nil
 		default:
+			// 极其罕见的瞬时耗尽降级备用
 			conn, err = w.connect(metadata)
 			headerSent = true
 			return conn, headerSent, err
