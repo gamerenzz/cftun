@@ -82,12 +82,14 @@ func NewWebsocket(params *Params) *Websocket {
 	return ws
 }
 
+// ForceResetPools 强制释放当前池子中所有的旧连接，阻断旧物理链路，强行激发无感迁移
 func (w *Websocket) ForceResetPools() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	log.Infoln("[Failover] Evicting active connections and clearing pools for migration...")
 
+	// 1. 清空并关闭普通连接池
 	for {
 		select {
 		case conn := <-w.connPool:
@@ -98,6 +100,7 @@ func (w *Websocket) ForceResetPools() {
 	}
 
 resetInteractive:
+	// 2. 清空并关闭交互连接池
 	for {
 		select {
 		case conn := <-w.interactivePool:
@@ -109,26 +112,26 @@ resetInteractive:
 
 rebuild:
 	w.connCount.Store(0)
+	// 3. 立刻重新预热基于新 IP 的 4 条新连接，等待应用毫秒级内自动接入
 	go w.preWarmInteractivePool()
 }
 
 func (w *Websocket) preWarmInteractivePool() {
-	// 极致安全升级：启动时仅静默预热 1 条高活性连接，采取温和低调启动策略
-	// 这不仅能完美绕过 Windows 安全软件对多高并发套接字的行为分析拦截，还能在毫秒级内完成备用
-	log.Infoln("[Optimizer] Pre-warming active interactive WebSocket stream to Cloudflare...")
-	go func() {
-		conn, err := w.connect(nil)
-		if err == nil {
-			select {
-			case w.interactivePool <- conn:
-			default:
-				_ = conn.Close()
+	log.Infoln("[Optimizer] Pre-warming 4 high-speed interactive WebSocket streams to Cloudflare...")
+	for i := 0; i < 4; i++ {
+		go func() {
+			conn, err := w.connect(nil)
+			if err == nil {
+				select {
+				case w.interactivePool <- conn:
+				default:
+					_ = conn.Close()
+				}
 			}
-		}
-	}()
+		}()
+	}
 }
 
-// 异步按需单包补货，维持连接池健康动态平衡
 func (w *Websocket) replenishInteractive() {
 	conn, err := w.connect(nil)
 	if err == nil {
@@ -224,7 +227,6 @@ func (w *Websocket) Dial(metadata *metadata.Metadata) (conn net.Conn, headerSent
 	if metadata != nil && (metadata.Network.String() == "udp" || metadata.DstPort == 5938 || metadata.DstPort == 3389) {
 		select {
 		case conn = <-w.interactivePool:
-			// 自动异步补货（温和的 1 对 1 补货机制）
 			go w.replenishInteractive()
 			return conn, false, nil
 		default:
