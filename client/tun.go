@@ -29,8 +29,6 @@ func (t *Tun) ipv4() string {
 	if t.Ipv4 != "" {
 		return t.Ipv4
 	}
-	// 核心修复：Windows/macOS 默认全部采用 RFC 2544 专属保留段 198.18.0.1
-	// 彻底绝杀一切 VMware NAT、家用路由器、企业内网等 IP 子网冲突，保障公网链路绝对通畅
 	return "198.18.0.1"
 }
 
@@ -84,6 +82,17 @@ func (t *Tun) Run(params *argo.Params) {
 
 func DeleteTunDevice(tunName string) {
 	tunToArgo.Stop()
+	
+	// 核心安全升级：在 Windows 环境下一键“停止”或“关闭软件”时，物理销毁虚拟网卡硬件实例，干净无残留
+	if runtime.GOOS == "windows" {
+		log.Infoln("[Route] Physically destroying WinTun adapter %s from Windows OS...", tunName)
+		// 采用系统内置的 PowerShell 安全卸载指令，毫秒级从 Windows 硬件管理器中注销网卡
+		cmd := exec.Command("powershell", "-Command", "Remove-NetAdapter -Name '"+tunName+"' -Confirm:$false")
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		_ = cmd.Run()
+		return
+	}
+	
 	if runtime.GOOS != "linux" {
 		return
 	}
