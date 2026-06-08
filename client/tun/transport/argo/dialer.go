@@ -82,14 +82,12 @@ func NewWebsocket(params *Params) *Websocket {
 	return ws
 }
 
-// ForceResetPools 强制释放当前池子中所有的旧连接，阻断旧物理链路，强行激发无感迁移
 func (w *Websocket) ForceResetPools() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	log.Infoln("[Failover] Evicting active connections and clearing pools for migration...")
 
-	// 1. 清空并关闭普通连接池
 	for {
 		select {
 		case conn := <-w.connPool:
@@ -100,7 +98,6 @@ func (w *Websocket) ForceResetPools() {
 	}
 
 resetInteractive:
-	// 2. 清空并关闭交互连接池
 	for {
 		select {
 		case conn := <-w.interactivePool:
@@ -112,13 +109,15 @@ resetInteractive:
 
 rebuild:
 	w.connCount.Store(0)
-	// 3. 立刻重新预热基于新 IP 的 4 条新连接，等待应用毫秒级内自动接入
 	go w.preWarmInteractivePool()
 }
 
 func (w *Websocket) preWarmInteractivePool() {
 	log.Infoln("[Optimizer] Pre-warming 4 high-speed interactive WebSocket streams to Cloudflare...")
 	for i := 0; i < 4; i++ {
+		// 核心安全优化：每次预热并发间隔 150ms 避峰
+		// 彻底防止本地 Windows Defender/安全软件在启动一瞬间将其判定为高并发扫描攻击而强行截断
+		time.Sleep(150 * time.Millisecond)
 		go func() {
 			conn, err := w.connect(nil)
 			if err == nil {
