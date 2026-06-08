@@ -3,7 +3,7 @@ package client
 import (
 	"encoding/json"
 	"fmt"
-	stdlog "log" // 导入系统标准日志包，用以拦截重定向
+	stdlog "log"
 	"net"
 	"os"
 	"os/exec"
@@ -124,7 +124,10 @@ var (
 	hButtonChoose  syscall.Handle
 	hExePathEdit   syscall.Handle
 
-	// 控制端连接成功后的组网 IP 专属提示组件
+	// 核心修复：补充声明缺失的自定义IP组件全局句柄
+	hCustomIpLabel syscall.Handle
+	hCustomIpEdit  syscall.Handle
+
 	hIpLabel   syscall.Handle
 	hIpEdit    syscall.Handle
 	hIpCopyBtn syscall.Handle
@@ -180,7 +183,7 @@ func CopyToClipboard(text string) {
 	copy(destSlice, srcSlice)
 
 	kernel32.NewProc("GlobalUnlock").Call(hMem)
-	user32.NewProc("SetClipboardData").Call(13, hMem)
+	user32.NewProc("SetClipboardData").Call(13, hMem) // CF_UNICODETEXT
 	user32.NewProc("CloseClipboard").Call()
 }
 
@@ -404,7 +407,6 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 	return 0
 }
 
-// guiLogWriter 捕获系统底层日志并向面板进行物理重定向
 type guiLogWriter struct{}
 
 func (g *guiLogWriter) Write(p []byte) (n int, err error) {
@@ -625,7 +627,6 @@ func StartWindowsGUI(onStart func()) {
 
 	user32.NewProc("SendMessageW").Call(uintptr(hLogBox), 0x0030, uintptr(hFontLog), 1)
 
-	// 重定向 Go 系统标准库的日志至控制面板（捕获 wireguard-go 底层输出）
 	stdlog.SetOutput(&guiLogWriter{})
 
 	go func() {
