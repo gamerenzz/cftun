@@ -124,7 +124,6 @@ var (
 	hButtonChoose  syscall.Handle
 	hExePathEdit   syscall.Handle
 
-	// 核心修复：补充声明缺失的自定义IP组件全局句柄
 	hCustomIpLabel syscall.Handle
 	hCustomIpEdit  syscall.Handle
 
@@ -175,7 +174,7 @@ func CopyToClipboard(text string) {
 	textLen := len(text)
 	user32.NewProc("OpenClipboard").Call(0)
 	user32.NewProc("EmptyClipboard").Call()
-	hMem, _, _ := kernel32.NewProc("GlobalAlloc").Call(0x0002, uintptr(textLen*2+2)) // GMEM_MOVEABLE
+	hMem, _, _ := kernel32.NewProc("GlobalAlloc").Call(0x0002, uintptr(textLen*2+2))
 	ptr, _, _ := kernel32.NewProc("GlobalLock").Call(hMem)
 
 	destSlice := unsafe.Slice((*uint16)(unsafe.Pointer(ptr)), textLen+1)
@@ -183,7 +182,7 @@ func CopyToClipboard(text string) {
 	copy(destSlice, srcSlice)
 
 	kernel32.NewProc("GlobalUnlock").Call(hMem)
-	user32.NewProc("SetClipboardData").Call(13, hMem) // CF_UNICODETEXT
+	user32.NewProc("SetClipboardData").Call(13, hMem)
 	user32.NewProc("CloseClipboard").Call()
 }
 
@@ -249,7 +248,7 @@ func writeClientConfig(targetDomain, customIp string) {
 				"enable":    true,
 				"name":      "cftun0",
 				"log-level": "info",
-				"routes":    []string{"198.18.0.100/32"},
+				"routes":    []string{"172.29.29.100/32"}, // 自动输出 172.29.29.100 路由表
 			},
 		},
 	}
@@ -332,8 +331,8 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 				log.Infoln("[GUI] 临时隧道域名已成功复制到系统剪贴板。")
 			}
 		case IDC_BUTTON_IP_COPY:
-			CopyToClipboard("198.18.0.100")
-			log.Infoln("[GUI] 组网专用 IP 198.18.0.100 已成功复制。请直接作为伙伴 ID 填入 TeamViewer 连接。")
+			CopyToClipboard("172.29.29.100")
+			log.Infoln("[GUI] 组网专用 IP 172.29.29.100 已成功复制。请直接作为伙伴 ID 填入 TeamViewer 连接。")
 		case IDC_BUTTON_START:
 			if !isRunning {
 				if isServerMode {
@@ -552,7 +551,7 @@ func StartWindowsGUI(onStart func()) {
 	hIpLabel = syscall.Handle(hIpLabelVal)
 
 	hIpEditVal, _, _ := procCreateWindow.Call(
-		0x00000200, uintptr(unsafe.Pointer(textToUTF16("EDIT"))), uintptr(unsafe.Pointer(textToUTF16("198.18.0.100"))),
+		0x00000200, uintptr(unsafe.Pointer(textToUTF16("EDIT"))), uintptr(unsafe.Pointer(textToUTF16("172.29.29.100"))), // 核心对齐：界面默认显示的 IP 同步修正为 172.29.29.100
 		WS_CHILD|0x0800, 270, 141, 260, 35, hMainVal, 0, hInstance, 0,
 	)
 	hIpEdit = syscall.Handle(hIpEditVal)
