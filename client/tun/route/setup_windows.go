@@ -55,9 +55,9 @@ func configureAddressImpl(tunName, ipv4, ipv6 string) {
 	log.Infoln("[Route] Configuring IP address for WinTun adapter %s...", tunName)
 	var err error
 
-	// 核心优化：自适应循环重试 5 次，每次休眠 300ms，等待 Windows 物理网卡就绪后再配置 IP
+	// 核心修复：在 netsh 配置命令最后显式注入 255.255.255.0 掩码，将路由限制在精细的本地子网，绝对不覆盖全局路由
 	for i := 0; i < 5; i++ {
-		err = exec.Command("netsh", "interface", "ipv4", "set", "address", tunName, "static", ipv4).Run()
+		err = exec.Command("netsh", "interface", "ipv4", "set", "address", tunName, "static", ipv4, "255.255.255.0").Run()
 		if err == nil {
 			break
 		}
@@ -66,7 +66,7 @@ func configureAddressImpl(tunName, ipv4, ipv6 string) {
 	if err != nil {
 		log.Errorln("[Route] Failed to add IPv4 address to %s: %v", tunName, err)
 	} else {
-		log.Infoln("[Route] IPv4 address %s configured on %s successfully.", ipv4, tunName)
+		log.Infoln("[Route] IPv4 address %s (mask: 255.255.255.0) configured on %s successfully.", ipv4, tunName)
 	}
 
 	for i := 0; i < 5; i++ {
@@ -80,7 +80,6 @@ func configureAddressImpl(tunName, ipv4, ipv6 string) {
 		log.Warnln("[Route] Failed to add IPv6 address to %s: %v (Usually safe to ignore)", tunName, err)
 	}
 
-	// 配置 DNS，同样引入就绪重试
 	for i := 0; i < 5; i++ {
 		err = exec.Command("netsh", "interface", "ipv4", "set", "dnsservers", fmt.Sprintf("name=%s", tunName),
 			"static", "address=8.8.8.8", "register=none", "validate=no").Run()
