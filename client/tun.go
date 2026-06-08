@@ -29,9 +29,10 @@ func (t *Tun) ipv4() string {
 	if t.Ipv4 != "" {
 		return t.Ipv4
 	}
-	// 核心修复：Windows/macOS 默认全部采用 RFC 2544 专属保留段 198.18.0.1
-	// 彻底绝杀一切 VMware NAT、家用路由器、企业内网等 IP 子网冲突，保障公网链路绝对通畅
-	return "198.18.0.1"
+	// 终极物理层修复：Windows下采用 10.254.254.1（A类保留网段）作为网卡IP
+	// 1. 彻底隔离任何物理网络或虚拟机的子网冲突。
+	// 2. 强行拉开与 198.18.0.100 的网段距离，强行阻断 Windows 的 ARP 本地解析，逼迫系统直接将 IP 报文投递进 TUN 网卡！
+	return "10.254.254.1"
 }
 
 func (t *Tun) ipv6() string {
