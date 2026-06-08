@@ -29,9 +29,11 @@ type Websocket struct {
 func NewWebsocket(config *Config, tunnel *Tunnel) *Websocket {
 	host := strings.Split(tunnel.Url, "/")[0]
 	
+	// 核心抗抖动升级：主握手通道同样拓宽至 6 秒超时保护
 	wsDialer := &websocket.Dialer{
 		TLSClientConfig:   &tls.Config{ServerName: host},
 		Proxy:             http.ProxyFromEnvironment,
+		HandshakeTimeout:  6 * time.Second,
 	}
 
 	dial := net.Dial
@@ -107,17 +109,14 @@ func (w *Websocket) monitorLinkQualityAndFailover() {
 		log.Infoln("[Monitor] Active Tunnel Status: RTT: %dms | Jitter: %dms | LossMetric: %d | Rating: %s",
 			latency, jitter, loss, rating)
 
-		// P2 真·连接漂移式 Failover
 		if rating == "Poor (较差)" {
 			log.Warnln("[Failover] Quality degraded to Poor. Initiating active connection migration...")
 			w.lossCounter.Store(0)
 			w.latencyValue.Store(0)
 			
-			// 1. 在本地更新最优 Anycast IP
 			newIP := SelectBestIP(w.config.GlobalUrl)
 			w.config.CdnIp = newIP
 
-			// 2. 强行驱逐、断开并重建当前的物理连接池，将旧物理连接斩断，实现无缝热迁移
 			if engine.ArgoProxy != nil {
 				engine.ArgoProxy.MigratePools()
 			}
