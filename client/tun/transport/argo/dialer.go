@@ -45,14 +45,10 @@ func NewWebsocket(params *Params) *Websocket {
 	hostPath := strings.Split(params.Url, "/")
 	host := hostPath[0]
 
-	// 核心优化：将 WSS 握手超时时间拓宽至 6 秒，给 TCP/TLS 留足重传缓冲，完美抗下 20% 极端丢包
 	wsDialer := &websocket.Dialer{
 		TLSClientConfig:   &tls.Config{ServerName: host},
 		Proxy:             http.ProxyFromEnvironment,
 		HandshakeTimeout:  6 * time.Second,
-		ReadBufferSize:    32 << 10,
-		WriteBufferSize:   32 << 10,
-		EnableCompression: false,
 	}
 
 	address := net.JoinHostPort(params.CdnIP, strconv.Itoa(params.Port))
@@ -184,7 +180,8 @@ func (w *Websocket) header(metadata *metadata.Metadata) http.Header {
 	header.Set("User-Agent", w.headers.Get("User-Agent"))
 
 	destAddr := metadata.DestinationAddress()
-	if strings.HasPrefix(destAddr, "198.18.") || strings.HasPrefix(destAddr, "192.168.123.") {
+	// 核心修复：添加 172.29.29.x 私有回环重写，映射到服务端的 127.0.0.1 本地回环
+	if strings.HasPrefix(destAddr, "172.29.29.") || strings.HasPrefix(destAddr, "198.18.") || strings.HasPrefix(destAddr, "192.168.123.") {
 		_, port, err := net.SplitHostPort(destAddr)
 		if err == nil {
 			destAddr = net.JoinHostPort("127.0.0.1", port)
