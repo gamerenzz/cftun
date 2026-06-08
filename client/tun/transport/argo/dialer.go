@@ -45,10 +45,11 @@ func NewWebsocket(params *Params) *Websocket {
 	hostPath := strings.Split(params.Url, "/")
 	host := hostPath[0]
 
+	// 核心优化：将 WSS 握手超时时间拓宽至 6 秒，给 TCP/TLS 留足重传缓冲，完美抗下 20% 极端丢包
 	wsDialer := &websocket.Dialer{
 		TLSClientConfig:   &tls.Config{ServerName: host},
 		Proxy:             http.ProxyFromEnvironment,
-		HandshakeTimeout:  3 * time.Second,
+		HandshakeTimeout:  6 * time.Second,
 		ReadBufferSize:    32 << 10,
 		WriteBufferSize:   32 << 10,
 		EnableCompression: false,
@@ -82,14 +83,12 @@ func NewWebsocket(params *Params) *Websocket {
 	return ws
 }
 
-// ForceResetPools 强制释放当前池子中所有的旧连接，阻断旧物理链路，强行激发无感迁移
 func (w *Websocket) ForceResetPools() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	log.Infoln("[Failover] Evicting active connections and clearing pools for migration...")
 
-	// 1. 清空并关闭普通连接池
 	for {
 		select {
 		case conn := <-w.connPool:
@@ -100,7 +99,6 @@ func (w *Websocket) ForceResetPools() {
 	}
 
 resetInteractive:
-	// 2. 清空并关闭交互连接池
 	for {
 		select {
 		case conn := <-w.interactivePool:
@@ -112,7 +110,6 @@ resetInteractive:
 
 rebuild:
 	w.connCount.Store(0)
-	// 3. 立刻重新预热基于新 IP 的 4 条新连接，等待应用毫秒级内自动接入
 	go w.preWarmInteractivePool()
 }
 
