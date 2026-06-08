@@ -29,14 +29,9 @@ func (t *Tun) ipv4() string {
 	if t.Ipv4 != "" {
 		return t.Ipv4
 	}
-	switch runtime.GOOS {
-	case "windows":
-		return "192.168.123.1"
-	case "darwin":
-		return "192.168.123.1"
-	default:
-		return "198.18.0.1"
-	}
+	// 核心修复：Windows/macOS 默认全部采用 RFC 2544 专属保留段 198.18.0.1
+	// 彻底绝杀一切 VMware NAT、家用路由器、企业内网等 IP 子网冲突，保障公网链路绝对通畅
+	return "198.18.0.1"
 }
 
 func (t *Tun) ipv6() string {
@@ -46,14 +41,12 @@ func (t *Tun) ipv6() string {
 	return "fd12:3456:789a::1"
 }
 
-// probeAutoPathMTU 在 Windows 底层使用带 -f (DF禁止分片) 和 -l (尺寸) 的真实 ICMP 探测真 PMTU 极限
 func (t *Tun) probeAutoPathMTU() int {
 	log.Infoln("[MTU] Initiating Windows Native PMTU Discovery (PMTUD)...")
-	targetIP := "223.5.5.5" // 以阿里公共 Anycast DNS 为探测目标
+	targetIP := "223.5.5.5"
 	
 	testMTUs := []int{1450, 1400, 1350, 1300}
 	for _, m := range testMTUs {
-		// 除去 IP 头(20字节)和 ICMP 头(8字节)，真实发包大小为 m - 28 字节
 		payloadSize := fmt.Sprintf("%d", m-28)
 		cmd := exec.Command("ping", "-n", "1", "-f", "-l", payloadSize, targetIP)
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
