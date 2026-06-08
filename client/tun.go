@@ -29,7 +29,9 @@ func (t *Tun) ipv4() string {
 	if t.Ipv4 != "" {
 		return t.Ipv4
 	}
-	return "198.18.0.1"
+	// 终极修复：使用 B 类专用私有网段 172.29.29.1 (RFC 1918)
+	// 既满足 TeamViewer 仅限局域网连接的安全判定，又 100% 避开任何家用路由器和虚拟机 VM NAT 的物理网段冲突
+	return "172.29.29.1"
 }
 
 func (t *Tun) ipv6() string {
@@ -83,10 +85,8 @@ func (t *Tun) Run(params *argo.Params) {
 func DeleteTunDevice(tunName string) {
 	tunToArgo.Stop()
 	
-	// 核心安全升级：在 Windows 环境下一键“停止”或“关闭软件”时，物理销毁虚拟网卡硬件实例，干净无残留
 	if runtime.GOOS == "windows" {
 		log.Infoln("[Route] Physically destroying WinTun adapter %s from Windows OS...", tunName)
-		// 采用系统内置的 PowerShell 安全卸载指令，毫秒级从 Windows 硬件管理器中注销网卡
 		cmd := exec.Command("powershell", "-Command", "Remove-NetAdapter -Name '"+tunName+"' -Confirm:$false")
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 		_ = cmd.Run()
