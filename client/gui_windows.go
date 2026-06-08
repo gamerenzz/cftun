@@ -3,6 +3,7 @@ package client
 import (
 	"encoding/json"
 	"fmt"
+	stdlog "log" // 导入系统标准日志包，用以拦截重定向
 	"net"
 	"os"
 	"os/exec"
@@ -122,9 +123,8 @@ var (
 	hCheckAdvanced syscall.Handle
 	hButtonChoose  syscall.Handle
 	hExePathEdit   syscall.Handle
-	hCustomIpLabel  syscall.Handle
-	hCustomIpEdit   syscall.Handle
 
+	// 控制端连接成功后的组网 IP 专属提示组件
 	hIpLabel   syscall.Handle
 	hIpEdit    syscall.Handle
 	hIpCopyBtn syscall.Handle
@@ -180,7 +180,7 @@ func CopyToClipboard(text string) {
 	copy(destSlice, srcSlice)
 
 	kernel32.NewProc("GlobalUnlock").Call(hMem)
-	user32.NewProc("SetClipboardData").Call(13, hMem) // CF_UNICODETEXT
+	user32.NewProc("SetClipboardData").Call(13, hMem)
 	user32.NewProc("CloseClipboard").Call()
 }
 
@@ -280,21 +280,21 @@ func stopAssociatedApp() {
 
 func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 	switch msg {
-	case 0x0138, 0x0133: // WM_CTLCOLORSTATIC, WM_CTLCOLOREDIT
+	case 0x0138, 0x0133:
 		if lParam == uintptr(hIpEdit) {
-			gdi32.NewProc("SetTextColor").Call(wParam, 0x000000FF) // RGB(255, 0, 0)
-			gdi32.NewProc("SetBkMode").Call(wParam, 1)             // TRANSPARENT
-			ret, _, _ := user32.NewProc("GetSysColorBrush").Call(5) // COLOR_WINDOW
+			gdi32.NewProc("SetTextColor").Call(wParam, 0x000000FF)
+			gdi32.NewProc("SetBkMode").Call(wParam, 1)
+			ret, _, _ := user32.NewProc("GetSysColorBrush").Call(5)
 			return ret
 		}
 	case WM_COMMAND:
 		switch wParam {
 		case IDC_RADIO_SERVER:
 			isServerMode = true
-			procShowWindow.Call(uintptr(hDomainLabel), 5) // SW_SHOW
+			procShowWindow.Call(uintptr(hDomainLabel), 5)
 			procShowWindow.Call(uintptr(hDomainEdit), 5)
 			procShowWindow.Call(uintptr(hButtonCopy), 5)
-			procShowWindow.Call(uintptr(hInputLabel), 0) // SW_HIDE
+			procShowWindow.Call(uintptr(hInputLabel), 0)
 			procShowWindow.Call(uintptr(hInputEdit), 0)
 			procShowWindow.Call(uintptr(hIpLabel), 0)
 			procShowWindow.Call(uintptr(hIpEdit), 0)
@@ -304,10 +304,10 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 			procSetWindowText.Call(uintptr(hButtonStart), uintptr(unsafe.Pointer(textToUTF16("开启被控端 (生成临时隧道)"))))
 		case IDC_RADIO_CLIENT:
 			isServerMode = false
-			procShowWindow.Call(uintptr(hDomainLabel), 0) // SW_HIDE
+			procShowWindow.Call(uintptr(hDomainLabel), 0)
 			procShowWindow.Call(uintptr(hDomainEdit), 0)
 			procShowWindow.Call(uintptr(hButtonCopy), 0)
-			procShowWindow.Call(uintptr(hInputLabel), 5) // SW_SHOW
+			procShowWindow.Call(uintptr(hInputLabel), 5)
 			procShowWindow.Call(uintptr(hInputEdit), 5)
 			procShowWindow.Call(uintptr(hIpLabel), 5)
 			procShowWindow.Call(uintptr(hIpEdit), 5)
@@ -404,6 +404,14 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 	return 0
 }
 
+// guiLogWriter 捕获系统底层日志并向面板进行物理重定向
+type guiLogWriter struct{}
+
+func (g *guiLogWriter) Write(p []byte) (n int, err error) {
+	WriteLogToGui(string(p))
+	return len(p), nil
+}
+
 func WriteLogToGui(text string) {
 	if hLogBox != 0 {
 		cleanText := stripANSI(text)
@@ -464,7 +472,6 @@ func StartWindowsGUI(onStart func()) {
 	hMainVal, _, _ := procCreateWindow.Call(
 		0,
 		uintptr(unsafe.Pointer(className)),
-		// 配合正名：控制面板标题变更为“交互快速通道 (Interactive Fast Lane)”专属标识
 		uintptr(unsafe.Pointer(textToUTF16("CFTUN 远程桌面专属加速控制面板 (交互快速通道) "))),
 		WS_OVERLAPPEDWINDOW|WS_VISIBLE,
 		100, 100, 680, 640,
@@ -617,6 +624,9 @@ func StartWindowsGUI(onStart func()) {
 	}
 
 	user32.NewProc("SendMessageW").Call(uintptr(hLogBox), 0x0030, uintptr(hFontLog), 1)
+
+	// 重定向 Go 系统标准库的日志至控制面板（捕获 wireguard-go 底层输出）
+	stdlog.SetOutput(&guiLogWriter{})
 
 	go func() {
 		sub, err := log.Subscribe()
