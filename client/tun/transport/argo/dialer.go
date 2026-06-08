@@ -113,24 +113,22 @@ rebuild:
 }
 
 func (w *Websocket) preWarmInteractivePool() {
-	log.Infoln("[Optimizer] Pre-warming 4 high-speed interactive WebSocket streams to Cloudflare...")
-	for i := 0; i < 4; i++ {
-		// 核心安全优化：每次预热并发间隔 150ms 避峰
-		// 彻底防止本地 Windows Defender/安全软件在启动一瞬间将其判定为高并发扫描攻击而强行截断
-		time.Sleep(150 * time.Millisecond)
-		go func() {
-			conn, err := w.connect(nil)
-			if err == nil {
-				select {
-				case w.interactivePool <- conn:
-				default:
-					_ = conn.Close()
-				}
+	// 极致安全升级：启动时仅静默预热 1 条高活性连接，采取温和低调启动策略
+	// 这不仅能完美绕过 Windows 安全软件对多高并发套接字的行为分析拦截，还能在毫秒级内完成备用
+	log.Infoln("[Optimizer] Pre-warming active interactive WebSocket stream to Cloudflare...")
+	go func() {
+		conn, err := w.connect(nil)
+		if err == nil {
+			select {
+			case w.interactivePool <- conn:
+			default:
+				_ = conn.Close()
 			}
-		}()
-	}
+		}
+	}()
 }
 
+// 异步按需单包补货，维持连接池健康动态平衡
 func (w *Websocket) replenishInteractive() {
 	conn, err := w.connect(nil)
 	if err == nil {
@@ -226,6 +224,7 @@ func (w *Websocket) Dial(metadata *metadata.Metadata) (conn net.Conn, headerSent
 	if metadata != nil && (metadata.Network.String() == "udp" || metadata.DstPort == 5938 || metadata.DstPort == 3389) {
 		select {
 		case conn = <-w.interactivePool:
+			// 自动异步补货（温和的 1 对 1 补货机制）
 			go w.replenishInteractive()
 			return conn, false, nil
 		default:
