@@ -56,6 +56,7 @@ const (
 	IDC_BUTTON_STOP     = 1006
 	IDC_BUTTON_CHOOSE   = 1007
 	IDC_BUTTON_IP_COPY  = 1008
+	IDC_CHECK_PROXY     = 1009
 )
 
 type WNDCLASSEXW struct {
@@ -123,9 +124,13 @@ var (
 	hCheckAdvanced syscall.Handle
 	hButtonChoose  syscall.Handle
 	hExePathEdit   syscall.Handle
-
 	hCustomIpLabel syscall.Handle
 	hCustomIpEdit  syscall.Handle
+
+	// 核心增加：本地代理一横排组件
+	hCheckProxy     syscall.Handle
+	hProxyPortLabel syscall.Handle
+	hProxyPortEdit  syscall.Handle
 
 	hIpLabel   syscall.Handle
 	hIpEdit    syscall.Handle
@@ -174,7 +179,7 @@ func CopyToClipboard(text string) {
 	textLen := len(text)
 	user32.NewProc("OpenClipboard").Call(0)
 	user32.NewProc("EmptyClipboard").Call()
-	hMem, _, _ := kernel32.NewProc("GlobalAlloc").Call(0x0002, uintptr(textLen*2+2))
+	hMem, _, _ := kernel32.NewProc("GlobalAlloc").Call(0x0002, uintptr(textLen*2+2)) // GMEM_MOVEABLE
 	ptr, _, _ := kernel32.NewProc("GlobalLock").Call(hMem)
 
 	destSlice := unsafe.Slice((*uint16)(unsafe.Pointer(ptr)), textLen+1)
@@ -182,7 +187,7 @@ func CopyToClipboard(text string) {
 	copy(destSlice, srcSlice)
 
 	kernel32.NewProc("GlobalUnlock").Call(hMem)
-	user32.NewProc("SetClipboardData").Call(13, hMem)
+	user32.NewProc("SetClipboardData").Call(13, hMem) // CF_UNICODETEXT
 	user32.NewProc("CloseClipboard").Call()
 }
 
@@ -232,7 +237,7 @@ func writeDefaultServerConfig() {
 	_ = os.WriteFile("config.json", data, 0644)
 }
 
-func writeClientConfig(targetDomain, customIp string) {
+func writeClientConfig(targetDomain, customIp, socksProxy string) {
 	cdnIp := "auto"
 	if strings.TrimSpace(customIp) != "" {
 		cdnIp = strings.TrimSpace(customIp)
@@ -240,15 +245,16 @@ func writeClientConfig(targetDomain, customIp string) {
 
 	configMap := map[string]interface{}{
 		"client": map[string]interface{}{
-			"cdn-ip":     cdnIp,
-			"cdn-port":   443,
-			"scheme":     "wss",
-			"global-url": strings.TrimSpace(targetDomain),
+			"cdn-ip":       cdnIp,
+			"cdn-port":     443,
+			"scheme":       "wss",
+			"global-url":   strings.TrimSpace(targetDomain),
+			"socks5-proxy": strings.TrimSpace(socksProxy), // 将界面采集的本地 SOCKS5 代理写入配置
 			"tun": map[string]interface{}{
 				"enable":    true,
 				"name":      "cftun0",
 				"log-level": "info",
-				"routes":    []string{"172.29.29.100/32"}, // 自动输出 172.29.29.100 路由表
+				"routes":    []string{"172.29.29.100/32"},
 			},
 		},
 	}
@@ -293,29 +299,35 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 		switch wParam {
 		case IDC_RADIO_SERVER:
 			isServerMode = true
-			procShowWindow.Call(uintptr(hDomainLabel), 5)
+			procShowWindow.Call(uintptr(hDomainLabel), 5) // SW_SHOW
 			procShowWindow.Call(uintptr(hDomainEdit), 5)
 			procShowWindow.Call(uintptr(hButtonCopy), 5)
-			procShowWindow.Call(uintptr(hInputLabel), 0)
+			procShowWindow.Call(uintptr(hInputLabel), 0) // SW_HIDE
 			procShowWindow.Call(uintptr(hInputEdit), 0)
 			procShowWindow.Call(uintptr(hIpLabel), 0)
 			procShowWindow.Call(uintptr(hIpEdit), 0)
 			procShowWindow.Call(uintptr(hIpCopyBtn), 0)
 			procShowWindow.Call(uintptr(hCustomIpLabel), 0)
 			procShowWindow.Call(uintptr(hCustomIpEdit), 0)
+			procShowWindow.Call(uintptr(hCheckProxy), 0)
+			procShowWindow.Call(uintptr(hProxyPortLabel), 0)
+			procShowWindow.Call(uintptr(hProxyPortEdit), 0)
 			procSetWindowText.Call(uintptr(hButtonStart), uintptr(unsafe.Pointer(textToUTF16("开启被控端 (生成临时隧道)"))))
 		case IDC_RADIO_CLIENT:
 			isServerMode = false
-			procShowWindow.Call(uintptr(hDomainLabel), 0)
+			procShowWindow.Call(uintptr(hDomainLabel), 0) // SW_HIDE
 			procShowWindow.Call(uintptr(hDomainEdit), 0)
 			procShowWindow.Call(uintptr(hButtonCopy), 0)
-			procShowWindow.Call(uintptr(hInputLabel), 5)
+			procShowWindow.Call(uintptr(hInputLabel), 5) // SW_SHOW
 			procShowWindow.Call(uintptr(hInputEdit), 5)
 			procShowWindow.Call(uintptr(hIpLabel), 5)
 			procShowWindow.Call(uintptr(hIpEdit), 5)
 			procShowWindow.Call(uintptr(hIpCopyBtn), 5)
 			procShowWindow.Call(uintptr(hCustomIpLabel), 5)
 			procShowWindow.Call(uintptr(hCustomIpEdit), 5)
+			procShowWindow.Call(uintptr(hCheckProxy), 5) // 客户端模式专属展示 SOCKS5 组件
+			procShowWindow.Call(uintptr(hProxyPortLabel), 5)
+			procShowWindow.Call(uintptr(hProxyPortEdit), 5)
 			procSetWindowText.Call(uintptr(hButtonStart), uintptr(unsafe.Pointer(textToUTF16("一键连接被控端 (TUN虚拟网卡模式)"))))
 		case IDC_BUTTON_CHOOSE:
 			path := OpenExeFileDialog(hWnd)
@@ -335,6 +347,7 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 			log.Infoln("[GUI] 组网专用 IP 172.29.29.100 已成功复制。请直接作为伙伴 ID 填入 TeamViewer 连接。")
 		case IDC_BUTTON_START:
 			if !isRunning {
+				var socksProxy string
 				if isServerMode {
 					writeDefaultServerConfig()
 				} else {
@@ -344,7 +357,17 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 						WriteLogToGui("[GUI] 错误：请输入被控端提供的临时隧道域名！")
 						return 0
 					}
-					writeClientConfig(domain, customIp)
+
+					// 读取 SOCKS5 代理复选框状态
+					isProxyChecked, _, _ := user32.NewProc("SendMessageW").Call(uintptr(hCheckProxy), BM_GETCHECK, 0, 0)
+					if isProxyChecked == 1 {
+						portStr := getControlText(hProxyPortEdit)
+						if strings.TrimSpace(portStr) == "" {
+							portStr = "7890" // 缺省默认 7890 (Clash)
+						}
+						socksProxy = "127.0.0.1:" + strings.TrimSpace(portStr)
+					}
+					writeClientConfig(domain, customIp, socksProxy)
 				}
 				isRunning = true
 				procSetWindowText.Call(uintptr(hButtonStart), uintptr(unsafe.Pointer(textToUTF16("正在建立连接..."))))
@@ -352,6 +375,8 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 				user32.NewProc("EnableWindow").Call(uintptr(hRadioClient), 0)
 				user32.NewProc("EnableWindow").Call(uintptr(hInputEdit), 0)
 				user32.NewProc("EnableWindow").Call(uintptr(hCustomIpEdit), 0)
+				user32.NewProc("EnableWindow").Call(uintptr(hCheckProxy), 0)
+				user32.NewProc("EnableWindow").Call(uintptr(hProxyPortEdit), 0)
 				user32.NewProc("EnableWindow").Call(uintptr(hButtonStart), 0)
 				user32.NewProc("EnableWindow").Call(uintptr(hButtonChoose), 0)
 				user32.NewProc("EnableWindow").Call(uintptr(hButtonStop), 1)
@@ -379,6 +404,8 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 				user32.NewProc("EnableWindow").Call(uintptr(hRadioClient), 1)
 				user32.NewProc("EnableWindow").Call(uintptr(hInputEdit), 1)
 				user32.NewProc("EnableWindow").Call(uintptr(hCustomIpEdit), 1)
+				user32.NewProc("EnableWindow").Call(uintptr(hCheckProxy), 1)
+				user32.NewProc("EnableWindow").Call(uintptr(hProxyPortEdit), 1)
 				user32.NewProc("EnableWindow").Call(uintptr(hButtonStart), 1)
 				user32.NewProc("EnableWindow").Call(uintptr(hButtonChoose), 1)
 				user32.NewProc("EnableWindow").Call(uintptr(hButtonStop), 0)
@@ -551,7 +578,7 @@ func StartWindowsGUI(onStart func()) {
 	hIpLabel = syscall.Handle(hIpLabelVal)
 
 	hIpEditVal, _, _ := procCreateWindow.Call(
-		0x00000200, uintptr(unsafe.Pointer(textToUTF16("EDIT"))), uintptr(unsafe.Pointer(textToUTF16("172.29.29.100"))), // 核心对齐：界面默认显示的 IP 同步修正为 172.29.29.100
+		0x00000200, uintptr(unsafe.Pointer(textToUTF16("EDIT"))), uintptr(unsafe.Pointer(textToUTF16("172.29.29.100"))),
 		WS_CHILD|0x0800, 270, 141, 260, 35, hMainVal, 0, hInstance, 0,
 	)
 	hIpEdit = syscall.Handle(hIpEditVal)
@@ -587,24 +614,45 @@ func StartWindowsGUI(onStart func()) {
 	hButtonStop = syscall.Handle(hButtonStopVal)
 	user32.NewProc("EnableWindow").Call(uintptr(hButtonStop), 0)
 
+	// 7. 高级设置（包含一排紧凑的 SOCKS5 代理与自定义优选组件）
 	hCheckAdvancedVal, _, _ := procCreateWindow.Call(
-		0, uintptr(unsafe.Pointer(textToUTF16("BUTTON"))), uintptr(unsafe.Pointer(textToUTF16("高级设置：显示底层全量 Debug 日志"))),
-		WS_CHILD|WS_VISIBLE|0x0003, 10, 320, 290, 25, hMainVal, IDC_CHECK_ADVANCED, hInstance, 0,
+		0, uintptr(unsafe.Pointer(textToUTF16("BUTTON"))), uintptr(unsafe.Pointer(textToUTF16("Debug日志"))),
+		WS_CHILD|WS_VISIBLE|0x0003, 545, 320, 110, 30, hMainVal, IDC_CHECK_ADVANCED, hInstance, 0,
 	)
 	hCheckAdvanced = syscall.Handle(hCheckAdvancedVal)
 
 	hCustomIpLabelVal, _, _ := procCreateWindow.Call(
-		0, uintptr(unsafe.Pointer(textToUTF16("STATIC"))), uintptr(unsafe.Pointer(textToUTF16("自定义优选 IP (留空则自适应)："))),
-		WS_CHILD, 300, 322, 210, 25, hMainVal, 0, hInstance, 0,
+		0, uintptr(unsafe.Pointer(textToUTF16("STATIC"))), uintptr(unsafe.Pointer(textToUTF16("自定义IP："))),
+		WS_CHILD, 330, 322, 100, 30, hMainVal, 0, hInstance, 0,
 	)
 	hCustomIpLabel = syscall.Handle(hCustomIpLabelVal)
 
 	hCustomIpEditVal, _, _ := procCreateWindow.Call(
 		0x00000200, uintptr(unsafe.Pointer(textToUTF16("EDIT"))), 0,
-		WS_CHILD|0x0080, 510, 320, 140, 25, hMainVal, 0, hInstance, 0,
+		WS_CHILD|0x0080, 430, 320, 100, 25, hMainVal, 0, hInstance, 0,
 	)
 	hCustomIpEdit = syscall.Handle(hCustomIpEditVal)
 
+	// 核心增加：控制端专属 SOCKS5 代理复选框与端口输入
+	hCheckProxyVal, _, _ := procCreateWindow.Call(
+		0, uintptr(unsafe.Pointer(textToUTF16("BUTTON"))), uintptr(unsafe.Pointer(textToUTF16("使用 SOCKS5 代理"))),
+		WS_CHILD, 10, 320, 180, 30, hMainVal, IDC_CHECK_PROXY, hInstance, 0, // BS_AUTOCHECKBOX
+	)
+	hCheckProxy = syscall.Handle(hCheckProxyVal)
+
+	hProxyPortLabelVal, _, _ := procCreateWindow.Call(
+		0, uintptr(unsafe.Pointer(textToUTF16("STATIC"))), uintptr(unsafe.Pointer(textToUTF16("端口："))),
+		WS_CHILD, 200, 322, 50, 30, hMainVal, 0, hInstance, 0,
+	)
+	hProxyPortLabel = syscall.Handle(hProxyPortLabelVal)
+
+	hProxyPortEditVal, _, _ := procCreateWindow.Call(
+		0x00000200, uintptr(unsafe.Pointer(textToUTF16("EDIT"))), uintptr(unsafe.Pointer(textToUTF16("7890"))), // 默认填入 7890 (Clash)
+		WS_CHILD|0x0080, 250, 320, 60, 25, hMainVal, 0, hInstance, 0,
+	)
+	hProxyPortEdit = syscall.Handle(hProxyPortEditVal)
+
+	// 8. 日志监视编辑框
 	hLogBoxVal, _, _ := procCreateWindow.Call(
 		0x00000200, uintptr(unsafe.Pointer(textToUTF16("EDIT"))), 0,
 		WS_CHILD|WS_VISIBLE|ES_MULTILINE|ES_AUTOVSCROLL|WS_VSCROLL|0x0800,
@@ -614,7 +662,7 @@ func StartWindowsGUI(onStart func()) {
 
 	user32.NewProc("SendMessageW").Call(uintptr(hRadioServer), BM_SETCHECK, 1, 0)
 
-	allNormalControls := []syscall.Handle{hGrpRole, hRadioServer, hRadioClient, hDomainLabel, hInputLabel, hIpLabel, hCheckAdvanced, hButtonChoose, hExePathEdit, hCustomIpLabel, hCustomIpEdit}
+	allNormalControls := []syscall.Handle{hGrpRole, hRadioServer, hRadioClient, hDomainLabel, hInputLabel, hIpLabel, hCheckAdvanced, hButtonChoose, hExePathEdit, hCustomIpLabel, hCustomIpEdit, hCheckProxy, hProxyPortLabel, hProxyPortEdit}
 	for _, ctrl := range allNormalControls {
 		user32.NewProc("SendMessageW").Call(uintptr(ctrl), 0x0030, uintptr(hFontNormal), 1)
 	}
