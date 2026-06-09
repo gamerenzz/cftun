@@ -71,24 +71,6 @@ func NewWebsocket(config *Config, tunnel *Tunnel) *Websocket {
 	return ws
 }
 
-// 启动客户端主通道 WebSocket 心跳保活
-func startMainGorillaKeepAlive(wsConn *websocket.Conn) {
-	ticker := time.NewTicker(3 * time.Second)
-	go func() {
-		defer ticker.Stop()
-		defer wsConn.Close()
-		for {
-			select {
-			case <-ticker.C:
-				err := wsConn.WriteMessage(websocket.PingMessage, []byte{})
-				if err != nil {
-					return
-				}
-			}
-		}
-	}()
-}
-
 func (w *Websocket) monitorLinkQualityAndFailover() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -167,9 +149,9 @@ func (w *Websocket) createWebsocketStream() (net.Conn, error) {
 
 	w.latencyValue.Store(time.Since(start).Milliseconds())
 
-	// 激活心跳保活
-	startMainGorillaKeepAlive(wsConn)
+	gConn := &argo.GorillaConn{Conn: wsConn}
+	argo.StartGorillaKeepAlive(gConn)
 
-	qosConn := dialer.NewQoSConn(&argo.GorillaConn{Conn: wsConn})
+	qosConn := dialer.NewQoSConn(gConn)
 	return qosConn, nil
 }
