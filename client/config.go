@@ -25,13 +25,14 @@ type Tunnel struct {
 }
 
 type Config struct {
-	CdnIp     string    `yaml:"cdn-ip" json:"cdn-ip"`
-	CdnPort   int       `yaml:"cdn-port" json:"cdn-port"`
-	PoolSize  int32     `yaml:"pool-size" json:"pool-size"`
-	GlobalUrl string    `yaml:"global-url" json:"global-url"`
-	Scheme    string    `yaml:"scheme" json:"scheme"`
-	Tunnels   []*Tunnel `yaml:"tunnels" json:"tunnels"`
-	Tun       *Tun      `yaml:"tun" json:"tun"`
+	CdnIp       string    `yaml:"cdn-ip" json:"cdn-ip"`
+	CdnPort     int       `yaml:"cdn-port" json:"cdn-port"`
+	PoolSize    int32     `yaml:"pool-size" json:"pool-size"`
+	GlobalUrl   string    `yaml:"global-url" json:"global-url"`
+	Scheme      string    `yaml:"scheme" json:"scheme"`
+	Tunnels     []*Tunnel `yaml:"tunnels" json:"tunnels"`
+	Tun         *Tun      `yaml:"tun" json:"tun"`
+	Socks5Proxy string    `yaml:"socks5-proxy" json:"socks5-proxy"` // 注入本地代理属性
 }
 
 var fallbackCfIps = []string{
@@ -58,18 +59,16 @@ func (p *ProbeResult) Score() float64 {
 	return float64(p.RTT.Milliseconds())*0.4 + p.Loss*1000.0*0.4 + float64(p.Jitter.Milliseconds())*0.2
 }
 
-// lookupHostHTTPDNS 采用加密 HTTP 协议向阿里公共 DNS 接口直连查询，100% 穿透 UDP 53 阻断与污染
 func lookupHostHTTPDNS(host string) ([]string, error) {
 	client := &http.Client{
 		Timeout: 1500 * time.Millisecond,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true, // 绕过老旧 Windows 系统下可能存在的根证书过期问题
+				InsecureSkipVerify: true,
 			},
 		},
 	}
 
-	// 阿里公共 DNS 官方加密直连接口（使用 IP 直接访问，省去域名解析套娃）
 	url := fmt.Sprintf("https://223.5.5.5/resolve?name=%s&type=A", host)
 	resp, err := client.Get(url)
 	if err != nil {
@@ -89,7 +88,7 @@ func lookupHostHTTPDNS(host string) ([]string, error) {
 
 	var ips []string
 	for _, ans := range r.Answer {
-		if ans.Type == 1 { // A 记录
+		if ans.Type == 1 {
 			ips = append(ips, ans.Data)
 		}
 	}
@@ -100,9 +99,7 @@ func lookupHostHTTPDNS(host string) ([]string, error) {
 	return ips, nil
 }
 
-// lookupHostSecure 采用 HTTPDNS 与 传统安全 UDP DNS 双通道冗余备份
 func lookupHostSecure(host string) ([]string, error) {
-	// 1. 优先采用 HTTPDNS 穿透技术（防拦截、防污染、高通过率）
 	ips, err := lookupHostHTTPDNS(host)
 	if err == nil && len(ips) > 0 {
 		log.Infoln("[Optimizer] HTTPDNS resolved official IPs successfully: %v", ips)
@@ -110,7 +107,6 @@ func lookupHostSecure(host string) ([]string, error) {
 	}
 	log.Warnln("[Optimizer] HTTPDNS lookup failed: %v. Falling back to UDP DNS...", err)
 
-	// 2. 备用降级：标准公共 UDP DNS 通道
 	dnsServers := []string{"223.5.5.5:53", "119.29.29.29:53", "1.1.1.1:53"}
 	var lastErr error
 	for _, dns := range dnsServers {
@@ -131,15 +127,12 @@ func lookupHostSecure(host string) ([]string, error) {
 	return nil, lastErr
 }
 
-// SelectBestIP 动态解析目标域名 IP 池
 func SelectBestIP(globalUrl string) string {
 	log.Infoln("[Optimizer] Rerouting initiated. Detecting official anycast IPs...")
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
 	host := strings.Split(globalUrl, "/")[0]
-	
-	// 通过安全通道动态解析
 	resolvedIps, err := lookupHostSecure(host)
 
 	var ipPool []string
@@ -227,11 +220,12 @@ func (c *Config) Run() {
 
 	if c.Tun != nil && c.Tun.Enable {
 		params := &argo.Params{
-			Scheme:   c.getScheme(),
-			CdnIP:    c.CdnIp,
-			Url:      c.GlobalUrl,
-			Port:     c.getPort(),
-			PoolSize: c.getPoolSize(),
+			Scheme:      c.getScheme(),
+			CdnIP:       c.CdnIp,
+			Url:         c.GlobalUrl,
+			Port:        c.getPort(),
+			PoolSize:    c.getPoolSize(),
+			Socks5Proxy: c.Socks5Proxy, // 向底层传输链路灌入本地代理参数
 		}
 		c.Tun.Run(params)
 	}
