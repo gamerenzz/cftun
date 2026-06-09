@@ -91,24 +91,6 @@ func NewWebsocket(params *Params) *Websocket {
 	return ws
 }
 
-// StartGorillaKeepAlive 改用互斥锁防护心跳接口，彻底绝杀写并发冲突导致的 1006 异常断连
-func StartGorillaKeepAlive(gConn *GorillaConn) {
-	ticker := time.NewTicker(3 * time.Second)
-	go func() {
-		defer ticker.Stop()
-		defer gConn.Close()
-		for {
-			select {
-			case <-ticker.C:
-				err := gConn.SendPing()
-				if err != nil {
-					return
-				}
-			}
-		}
-	}()
-}
-
 func (w *Websocket) ForceResetPools() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -241,10 +223,8 @@ func (w *Websocket) connect(metadata *metadata.Metadata) (net.Conn, error) {
 		_ = resp.Body.Close()
 	}
 
-	gConn := &GorillaConn{Conn: wsConn}
-	StartGorillaKeepAlive(gConn)
-
-	return dialer.NewQoSConn(gConn), nil
+	// 核心安全升级：完全移除客户端主动发送的 WSS Ping，防范 Cloudflare 的协议网关强制截杀
+	return dialer.NewQoSConn(&GorillaConn{Conn: wsConn}), nil
 }
 
 func (w *Websocket) Dial(metadata *metadata.Metadata) (conn net.Conn, headerSent bool, err error) {
