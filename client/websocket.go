@@ -14,6 +14,7 @@ import (
 	"github.com/fmnx/cftun/client/tun/transport/argo"
 	"github.com/fmnx/cftun/log"
 	"github.com/gorilla/websocket"
+	"golang.org/x/net/proxy"
 )
 
 type Websocket struct {
@@ -29,31 +30,28 @@ type Websocket struct {
 func NewWebsocket(config *Config, tunnel *Tunnel) *Websocket {
 	host := strings.Split(tunnel.Url, "/")[0]
 	
-	// 核心抗抖动升级：主握手通道同样拓宽至 6 秒超时保护
 	wsDialer := &websocket.Dialer{
 		TLSClientConfig:   &tls.Config{ServerName: host},
 		Proxy:             http.ProxyFromEnvironment,
 		HandshakeTimeout:  6 * time.Second,
 	}
 
-	dial := net.Dial
-	if !strings.Contains(tunnel.Listen, "0.0.0.0") && !strings.Contains(tunnel.Listen, "127.0.0.1") {
-		localIP, _, _ := net.SplitHostPort(tunnel.Listen)
-		localAddr := &net.TCPAddr{
-			IP:   net.ParseIP(localIP),
-			Port: 0,
-		}
-		dial = (&net.Dialer{
-			LocalAddr: localAddr,
-			Timeout:   5 * time.Second,
-		}).Dial
-	}
-
 	wsDialer.NetDial = func(network, addr string) (net.Conn, error) {
-		if config.CdnIp != "" {
-			return dial(network, config.getAddress())
+		dialer := &net.Dialer{Timeout: 5 * time.Second}
+		var baseDialer proxy.Dialer = dialer
+
+		// 核心升级：如果后台配置了本地 SOCKS5 代理（Clash），主通道握手将直接无缝走专线中转
+		if strings.TrimSpace(config.Socks5Proxy) != "" {
+			socksDialer, err := proxy.SOCKS5("tcp", config.Socks5Proxy, nil, dialer)
+			if err == nil {
+				baseDialer = socksDialer
+			}
 		}
-		return dial(network, addr)
+
+		if config.CdnIp != "" {
+			return baseDialer.Dial(network, config.getAddress())
+		}
+		return baseDialer.Dial(network, addr)
 	}
 
 	headers := make(http.Header)
