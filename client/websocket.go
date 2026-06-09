@@ -149,9 +149,8 @@ func (w *Websocket) createWebsocketStream() (net.Conn, error) {
 
 	w.latencyValue.Store(time.Since(start).Milliseconds())
 
+	// 核心安全升级：完全移除客户端主动发送的 WSS Ping，防范 Cloudflare 的协议网关强制截杀
 	gConn := &argo.GorillaConn{Conn: wsConn}
-	argo.StartGorillaKeepAlive(gConn)
-
 	qosConn := dialer.NewQoSConn(gConn)
 	return qosConn, nil
 }
