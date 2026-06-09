@@ -25,7 +25,7 @@ type Params struct {
 	Url         string `json:"url"`
 	Port        int    `json:"port"`
 	PoolSize    int32  `json:"pool-size"`
-	Socks5Proxy string `json:"socks5-proxy"` // 接收上层注入的代理参数
+	Socks5Proxy string `json:"socks5-proxy"`
 }
 
 type Websocket struct {
@@ -58,11 +58,13 @@ func NewWebsocket(params *Params) *Websocket {
 		dialer := &net.Dialer{Timeout: 5 * time.Second}
 		var baseDialer proxy.Dialer = dialer
 
-		// 核心升级：控制指令常备高防池同样自动无感转交给本地 SOCKS5 代理，走最顶级专线，避免队头阻塞
+		// 核心安全优化：如果启用了 SOCKS5 代理（Clash/v2rayN）
 		if strings.TrimSpace(params.Socks5Proxy) != "" {
 			socksDialer, err := proxy.SOCKS5("tcp", params.Socks5Proxy, nil, dialer)
 			if err == nil {
-				baseDialer = socksDialer
+				// 极重要：必须直接将“域名目标 (addr)”直传给代理，让代理节点在远端解析！
+				// 绝对不要把本地探测出的 Anycast IP 传过去，否则会导致 SNI 混淆报 tls: unrecognized name 错误
+				return socksDialer.Dial(network, addr)
 			}
 		}
 
