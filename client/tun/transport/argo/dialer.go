@@ -58,12 +58,9 @@ func NewWebsocket(params *Params) *Websocket {
 		dialer := &net.Dialer{Timeout: 5 * time.Second}
 		var baseDialer proxy.Dialer = dialer
 
-		// 核心安全优化：如果启用了 SOCKS5 代理（Clash/v2rayN）
 		if strings.TrimSpace(params.Socks5Proxy) != "" {
 			socksDialer, err := proxy.SOCKS5("tcp", params.Socks5Proxy, nil, dialer)
 			if err == nil {
-				// 极重要：必须直接将“域名目标 (addr)”直传给代理，让代理节点在远端解析！
-				// 绝对不要把本地探测出的 Anycast IP 传过去，否则会导致 SNI 混淆报 tls: unrecognized name 错误
 				return socksDialer.Dial(network, addr)
 			}
 		}
@@ -92,6 +89,25 @@ func NewWebsocket(params *Params) *Websocket {
 
 	go ws.preWarmInteractivePool()
 	return ws
+}
+
+// startGorillaKeepAlive 启动轻量级高频心跳保活引擎，确保 Cloudflare 边缘永远不主动断开连接
+func startGorillaKeepAlive(wsConn *websocket.Conn) {
+	ticker := time.NewTicker(3 * time.Second) // 每 3 秒发送一次轻量级 Ping 帧
+	go func() {
+		defer ticker.Stop()
+		defer wsConn.Close()
+		for {
+			select {
+			case <-ticker.C:
+				// 发送标准 RFC 6455 协议的 Ping 帧，强制保活
+				err := wsConn.WriteMessage(websocket.PingMessage, []byte{})
+				if err != nil {
+					return // 连接被断开或失效，平滑退出协程
+				}
+			}
+		}
+	}()
 }
 
 func (w *Websocket) ForceResetPools() {
@@ -225,6 +241,9 @@ func (w *Websocket) connect(metadata *metadata.Metadata) (net.Conn, error) {
 	if resp != nil && resp.Body != nil {
 		_ = resp.Body.Close()
 	}
+
+	// 激活心跳保活引擎
+	startGorillaKeepAlive(wsConn)
 
 	return dialer.NewQoSConn(&GorillaConn{Conn: wsConn}), nil
 }
