@@ -127,7 +127,6 @@ var (
 	hCustomIpLabel syscall.Handle
 	hCustomIpEdit  syscall.Handle
 
-	// 核心增加：本地代理一横排组件
 	hCheckProxy     syscall.Handle
 	hProxyPortLabel syscall.Handle
 	hProxyPortEdit  syscall.Handle
@@ -187,7 +186,7 @@ func CopyToClipboard(text string) {
 	copy(destSlice, srcSlice)
 
 	kernel32.NewProc("GlobalUnlock").Call(hMem)
-	user32.NewProc("SetClipboardData").Call(13, hMem) // CF_UNICODETEXT
+	user32.NewProc("SetClipboardData").Call(13, hMem)
 	user32.NewProc("CloseClipboard").Call()
 }
 
@@ -249,7 +248,7 @@ func writeClientConfig(targetDomain, customIp, socksProxy string) {
 			"cdn-port":     443,
 			"scheme":       "wss",
 			"global-url":   strings.TrimSpace(targetDomain),
-			"socks5-proxy": strings.TrimSpace(socksProxy), // 将界面采集的本地 SOCKS5 代理写入配置
+			"socks5-proxy": strings.TrimSpace(socksProxy),
 			"tun": map[string]interface{}{
 				"enable":    true,
 				"name":      "cftun0",
@@ -299,10 +298,10 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 		switch wParam {
 		case IDC_RADIO_SERVER:
 			isServerMode = true
-			procShowWindow.Call(uintptr(hDomainLabel), 5) // SW_SHOW
+			procShowWindow.Call(uintptr(hDomainLabel), 5)
 			procShowWindow.Call(uintptr(hDomainEdit), 5)
 			procShowWindow.Call(uintptr(hButtonCopy), 5)
-			procShowWindow.Call(uintptr(hInputLabel), 0) // SW_HIDE
+			procShowWindow.Call(uintptr(hInputLabel), 0)
 			procShowWindow.Call(uintptr(hInputEdit), 0)
 			procShowWindow.Call(uintptr(hIpLabel), 0)
 			procShowWindow.Call(uintptr(hIpEdit), 0)
@@ -315,17 +314,17 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 			procSetWindowText.Call(uintptr(hButtonStart), uintptr(unsafe.Pointer(textToUTF16("开启被控端 (生成临时隧道)"))))
 		case IDC_RADIO_CLIENT:
 			isServerMode = false
-			procShowWindow.Call(uintptr(hDomainLabel), 0) // SW_HIDE
+			procShowWindow.Call(uintptr(hDomainLabel), 0)
 			procShowWindow.Call(uintptr(hDomainEdit), 0)
 			procShowWindow.Call(uintptr(hButtonCopy), 0)
-			procShowWindow.Call(uintptr(hInputLabel), 5) // SW_SHOW
+			procShowWindow.Call(uintptr(hInputLabel), 5)
 			procShowWindow.Call(uintptr(hInputEdit), 5)
 			procShowWindow.Call(uintptr(hIpLabel), 5)
 			procShowWindow.Call(uintptr(hIpEdit), 5)
 			procShowWindow.Call(uintptr(hIpCopyBtn), 5)
 			procShowWindow.Call(uintptr(hCustomIpLabel), 5)
 			procShowWindow.Call(uintptr(hCustomIpEdit), 5)
-			procShowWindow.Call(uintptr(hCheckProxy), 5) // 客户端模式专属展示 SOCKS5 组件
+			procShowWindow.Call(uintptr(hCheckProxy), 5)
 			procShowWindow.Call(uintptr(hProxyPortLabel), 5)
 			procShowWindow.Call(uintptr(hProxyPortEdit), 5)
 			procSetWindowText.Call(uintptr(hButtonStart), uintptr(unsafe.Pointer(textToUTF16("一键连接被控端 (TUN虚拟网卡模式)"))))
@@ -358,12 +357,11 @@ func wndProc(hWnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 						return 0
 					}
 
-					// 读取 SOCKS5 代理复选框状态
 					isProxyChecked, _, _ := user32.NewProc("SendMessageW").Call(uintptr(hCheckProxy), BM_GETCHECK, 0, 0)
 					if isProxyChecked == 1 {
 						portStr := getControlText(hProxyPortEdit)
 						if strings.TrimSpace(portStr) == "" {
-							portStr = "7890" // 缺省默认 7890 (Clash)
+							portStr = "7890"
 						}
 						socksProxy = "127.0.0.1:" + strings.TrimSpace(portStr)
 					}
@@ -614,7 +612,6 @@ func StartWindowsGUI(onStart func()) {
 	hButtonStop = syscall.Handle(hButtonStopVal)
 	user32.NewProc("EnableWindow").Call(uintptr(hButtonStop), 0)
 
-	// 7. 高级设置（包含一排紧凑的 SOCKS5 代理与自定义优选组件）
 	hCheckAdvancedVal, _, _ := procCreateWindow.Call(
 		0, uintptr(unsafe.Pointer(textToUTF16("BUTTON"))), uintptr(unsafe.Pointer(textToUTF16("Debug日志"))),
 		WS_CHILD|WS_VISIBLE|0x0003, 545, 320, 110, 30, hMainVal, IDC_CHECK_ADVANCED, hInstance, 0,
@@ -633,10 +630,10 @@ func StartWindowsGUI(onStart func()) {
 	)
 	hCustomIpEdit = syscall.Handle(hCustomIpEditVal)
 
-	// 核心增加：控制端专属 SOCKS5 代理复选框与端口输入
+	// 核心修复：为“使用 SOCKS5 代理”复选框添加标准的 0x0003 自动打勾选择样式
 	hCheckProxyVal, _, _ := procCreateWindow.Call(
 		0, uintptr(unsafe.Pointer(textToUTF16("BUTTON"))), uintptr(unsafe.Pointer(textToUTF16("使用 SOCKS5 代理"))),
-		WS_CHILD, 10, 320, 180, 30, hMainVal, IDC_CHECK_PROXY, hInstance, 0, // BS_AUTOCHECKBOX
+		WS_CHILD|0x0003, 10, 320, 180, 30, hMainVal, IDC_CHECK_PROXY, hInstance, 0, // 0x0003 代表 BS_AUTOCHECKBOX
 	)
 	hCheckProxy = syscall.Handle(hCheckProxyVal)
 
@@ -647,12 +644,11 @@ func StartWindowsGUI(onStart func()) {
 	hProxyPortLabel = syscall.Handle(hProxyPortLabelVal)
 
 	hProxyPortEditVal, _, _ := procCreateWindow.Call(
-		0x00000200, uintptr(unsafe.Pointer(textToUTF16("EDIT"))), uintptr(unsafe.Pointer(textToUTF16("7890"))), // 默认填入 7890 (Clash)
+		0x00000200, uintptr(unsafe.Pointer(textToUTF16("EDIT"))), uintptr(unsafe.Pointer(textToUTF16("7890"))),
 		WS_CHILD|0x0080, 250, 320, 60, 25, hMainVal, 0, hInstance, 0,
 	)
 	hProxyPortEdit = syscall.Handle(hProxyPortEditVal)
 
-	// 8. 日志监视编辑框
 	hLogBoxVal, _, _ := procCreateWindow.Call(
 		0x00000200, uintptr(unsafe.Pointer(textToUTF16("EDIT"))), 0,
 		WS_CHILD|WS_VISIBLE|ES_MULTILINE|ES_AUTOVSCROLL|WS_VSCROLL|0x0800,
