@@ -23,11 +23,10 @@ const (
 
 type PingPeriodContext string
 
-// GorillaConn 是一个线程安全、带互斥写锁保护的 WebSocket 物理连接通道包装器
 type GorillaConn struct {
 	*websocket.Conn
 	readBuf bytes.Buffer
-	writeMu sync.Mutex // 核心安全升级：写互斥锁，彻底杜绝心跳保活与数据传输并发写冲突造成的 1006 断连
+	writeMu sync.Mutex
 }
 
 func (c *GorillaConn) Read(p []byte) (int, error) {
@@ -54,11 +53,17 @@ func (c *GorillaConn) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// SendPing 发送线程安全的心跳保活包
 func (c *GorillaConn) SendPing() error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	return c.Conn.WriteMessage(websocket.PingMessage, []byte{})
+}
+
+// SendPingWithPayload 允许发送带随机载荷的混淆 Ping 帧，使用写互斥锁保护，防止通道崩溃
+func (c *GorillaConn) SendPingWithPayload(payload []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.Conn.WriteMessage(websocket.PingMessage, payload)
 }
 
 func (c *GorillaConn) SetDeadline(t time.Time) error {
