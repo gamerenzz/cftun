@@ -1,4 +1,5 @@
 //go:build windows
+// +build windows
 
 package route
 
@@ -8,6 +9,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall" // 核心修复：补全导入，确保 Windows 下安全执行编译
 	"time"
 )
 
@@ -55,7 +57,7 @@ func configureAddressImpl(tunName, ipv4, ipv6 string) {
 	log.Infoln("[Route] Configuring IP address for WinTun adapter %s...", tunName)
 	var err error
 
-	// 核心优化：自适应循环重试 5 次，每次休眠 300ms，等待 Windows 物理网卡就绪后再配置 IP
+	// 自适应循环重试 5 次，确保 Windows 物理网卡就绪后再配置 IP
 	for i := 0; i < 5; i++ {
 		err = exec.Command("netsh", "interface", "ipv4", "set", "address", tunName, "static", ipv4).Run()
 		if err == nil {
@@ -69,8 +71,15 @@ func configureAddressImpl(tunName, ipv4, ipv6 string) {
 		log.Infoln("[Route] IPv4 address %s configured on %s successfully.", ipv4, tunName)
 	}
 
+	// 核心安全优化：强制将 WinTun 虚拟网卡的网络配置文件设置为“Private (专用)”，
+	// 彻底绕过 Windows Defender 防火墙对“未识别公共网络”默认且极其严格的入站/出站数据拦截！
+	log.Infoln("[Route] Promoting WinTun adapter %s network profile to Private...", tunName)
+	pCmd := exec.Command("powershell", "-Command", "Set-NetConnectionProfile -InterfaceAlias '"+tunName+"' -NetworkCategory Private")
+	pCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	_ = pCmd.Run()
+
 	for i := 0; i < 5; i++ {
-		err = exec.Command("netsh", "interface", "ipv6", "add", "address", tunName, ipv6).Run()
+		err = exec.Command("netsh", "interface", "ipv6", "add", "address", tunName, "static", ipv6).Run()
 		if err == nil {
 			break
 		}
@@ -80,7 +89,6 @@ func configureAddressImpl(tunName, ipv4, ipv6 string) {
 		log.Warnln("[Route] Failed to add IPv6 address to %s: %v (Usually safe to ignore)", tunName, err)
 	}
 
-	// 配置 DNS，同样引入就绪重试
 	for i := 0; i < 5; i++ {
 		err = exec.Command("netsh", "interface", "ipv4", "set", "dnsservers", fmt.Sprintf("name=%s", tunName),
 			"static", "address=8.8.8.8", "register=none", "validate=no").Run()
