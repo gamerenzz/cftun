@@ -91,19 +91,18 @@ func NewWebsocket(params *Params) *Websocket {
 	return ws
 }
 
-// startGorillaKeepAlive 启动轻量级高频心跳保活引擎，确保 Cloudflare 边缘永远不主动断开连接
-func startGorillaKeepAlive(wsConn *websocket.Conn) {
-	ticker := time.NewTicker(3 * time.Second) // 每 3 秒发送一次轻量级 Ping 帧
+// StartGorillaKeepAlive 改用互斥锁防护心跳接口，彻底绝杀写并发冲突导致的 1006 异常断连
+func StartGorillaKeepAlive(gConn *GorillaConn) {
+	ticker := time.NewTicker(3 * time.Second)
 	go func() {
 		defer ticker.Stop()
-		defer wsConn.Close()
+		defer gConn.Close()
 		for {
 			select {
 			case <-ticker.C:
-				// 发送标准 RFC 6455 协议的 Ping 帧，强制保活
-				err := wsConn.WriteMessage(websocket.PingMessage, []byte{})
+				err := gConn.SendPing()
 				if err != nil {
-					return // 连接被断开或失效，平滑退出协程
+					return
 				}
 			}
 		}
@@ -242,10 +241,10 @@ func (w *Websocket) connect(metadata *metadata.Metadata) (net.Conn, error) {
 		_ = resp.Body.Close()
 	}
 
-	// 激活心跳保活引擎
-	startGorillaKeepAlive(wsConn)
+	gConn := &GorillaConn{Conn: wsConn}
+	StartGorillaKeepAlive(gConn)
 
-	return dialer.NewQoSConn(&GorillaConn{Conn: wsConn}), nil
+	return dialer.NewQoSConn(gConn), nil
 }
 
 func (w *Websocket) Dial(metadata *metadata.Metadata) (conn net.Conn, headerSent bool, err error) {
