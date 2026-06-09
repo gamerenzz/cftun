@@ -149,8 +149,12 @@ func (w *Websocket) createWebsocketStream() (net.Conn, error) {
 
 	w.latencyValue.Store(time.Since(start).Milliseconds())
 
-	// 核心安全升级：完全移除客户端主动发送的 WSS Ping，防范 Cloudflare 的协议网关强制截杀
+	isUDP := false
+	if w.tunnel != nil && w.tunnel.Protocol == "udp" {
+		isUDP = true
+	}
+
 	gConn := &argo.GorillaConn{Conn: wsConn}
-	qosConn := dialer.NewQoSConn(gConn)
+	qosConn := dialer.NewQoSConn(gConn, isUDP)
 	return qosConn, nil
 }
