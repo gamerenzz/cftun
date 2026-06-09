@@ -16,27 +16,21 @@ import (
 )
 
 const (
-	// Time allowed to read the next pong message from the peer.
 	defaultPongWait = 60 * time.Second
-
-	// Send pings to peer with this period. Must be less than pongWait.
 	defaultPingPeriod = (defaultPongWait * 9) / 10
-
 	PingPeriodContextKey = PingPeriodContext("pingPeriod")
 )
 
 type PingPeriodContext string
 
-// GorillaConn is a wrapper around the standard gorilla websocket but implements a ReadWriter
-// This is still used by access carrier
+// GorillaConn 是一个线程安全、带互斥写锁保护的 WebSocket 物理连接通道包装器
 type GorillaConn struct {
 	*websocket.Conn
 	readBuf bytes.Buffer
+	writeMu sync.Mutex // 核心安全升级：写互斥锁，彻底杜绝心跳保活与数据传输并发写冲突造成的 1006 断连
 }
 
-// Read will read messages from the websocket connection
 func (c *GorillaConn) Read(p []byte) (int, error) {
-	// Intermediate buffer may contain unread bytes from the last read, start there before blocking on a new frame
 	if c.readBuf.Len() > 0 {
 		return c.readBuf.Read(p)
 	}
@@ -47,26 +41,26 @@ func (c *GorillaConn) Read(p []byte) (int, error) {
 	}
 
 	copied := copy(p, message)
-
-	// Write unread bytes to readBuf; if everything was read this is a no-op
-	// Write returns a nil error always and grows the buffer; everything is always written or panic
 	c.readBuf.Write(message[copied:])
-
 	return copied, nil
 }
 
-// Write will write messages to the websocket connection
 func (c *GorillaConn) Write(p []byte) (int, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	if err := c.Conn.WriteMessage(websocket.BinaryMessage, p); err != nil {
 		return 0, err
 	}
-
 	return len(p), nil
 }
 
-// SetDeadline sets both read and write deadlines, as per net.Conn interface docs:
-// "It is equivalent to calling both SetReadDeadline and SetWriteDeadline."
-// Note there is no synchronization here, but the gorilla implementation isn't thread safe anyway
+// SendPing 发送线程安全的心跳保活包
+func (c *GorillaConn) SendPing() error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.Conn.WriteMessage(websocket.PingMessage, []byte{})
+}
+
 func (c *GorillaConn) SetDeadline(t time.Time) error {
 	if err := c.Conn.SetReadDeadline(t); err != nil {
 		return fmt.Errorf("error setting read deadline: %w", err)
@@ -78,16 +72,12 @@ func (c *GorillaConn) SetDeadline(t time.Time) error {
 }
 
 type Conn struct {
-	rw  io.ReadWriter
-	log *zerolog.Logger
-	// writeLock makes sure
-	// 1. Only one write at a time. The pinger and Stream function can both call write.
-	// 2. Close only returns after in progress Write is finished, and no more Write will succeed after calling Close.
+	rw        io.ReadWriter
+	log       *zerolog.Logger
 	writeLock sync.Mutex
 	done      bool
 }
 
-// Read will read messages from the websocket connection
 func (c *Conn) Read(reader []byte) (int, error) {
 	data, err := wsutil.ReadClientBinary(c.rw)
 	if err != nil {
@@ -96,8 +86,6 @@ func (c *Conn) Read(reader []byte) (int, error) {
 	return copy(reader, data), nil
 }
 
-// Write will write messages to the websocket connection.
-// It will not write to the connection after Close is called to fix TUN-5184
 func (c *Conn) Write(p []byte) (int, error) {
 	c.writeLock.Lock()
 	defer c.writeLock.Unlock()
@@ -158,7 +146,6 @@ func (c *Conn) pingPeriod(ctx context.Context) time.Duration {
 	return defaultPingPeriod
 }
 
-// Close waits for the current write to finish. Further writes will return error
 func (c *Conn) Close() {
 	c.writeLock.Lock()
 	defer c.writeLock.Unlock()
