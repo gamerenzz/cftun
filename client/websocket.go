@@ -43,7 +43,6 @@ func NewWebsocket(config *Config, tunnel *Tunnel) *Websocket {
 		if strings.TrimSpace(config.Socks5Proxy) != "" {
 			socksDialer, err := proxy.SOCKS5("tcp", config.Socks5Proxy, nil, dialer)
 			if err == nil {
-				// 核心修复：走代理时直传域名目标 (addr)，让 Clash 在远端解析，绝杀 530 混淆与 TLS unrecognized name
 				return socksDialer.Dial(network, addr)
 			}
 		}
@@ -70,6 +69,24 @@ func NewWebsocket(config *Config, tunnel *Tunnel) *Websocket {
 
 	go ws.monitorLinkQualityAndFailover()
 	return ws
+}
+
+// 启动客户端主通道 WebSocket 心跳保活
+func startMainGorillaKeepAlive(wsConn *websocket.Conn) {
+	ticker := time.NewTicker(3 * time.Second)
+	go func() {
+		defer ticker.Stop()
+		defer wsConn.Close()
+		for {
+			select {
+			case <-ticker.C:
+				err := wsConn.WriteMessage(websocket.PingMessage, []byte{})
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
 }
 
 func (w *Websocket) monitorLinkQualityAndFailover() {
@@ -149,6 +166,9 @@ func (w *Websocket) createWebsocketStream() (net.Conn, error) {
 	}
 
 	w.latencyValue.Store(time.Since(start).Milliseconds())
+
+	// 激活心跳保活
+	startMainGorillaKeepAlive(wsConn)
 
 	qosConn := dialer.NewQoSConn(&argo.GorillaConn{Conn: wsConn})
 	return qosConn, nil
