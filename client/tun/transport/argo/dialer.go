@@ -16,14 +16,16 @@ import (
 	"github.com/fmnx/cftun/client/tun/metadata"
 	"github.com/fmnx/cftun/log"
 	"github.com/gorilla/websocket"
+	"golang.org/x/net/proxy"
 )
 
 type Params struct {
-	Scheme   string `json:"scheme"`
-	CdnIP    string `json:"cdn-ip"`
-	Url      string `json:"url"`
-	Port     int    `json:"port"`
-	PoolSize int32  `json:"pool-size"`
+	Scheme      string `json:"scheme"`
+	CdnIP       string `json:"cdn-ip"`
+	Url         string `json:"url"`
+	Port        int    `json:"port"`
+	PoolSize    int32  `json:"pool-size"`
+	Socks5Proxy string `json:"socks5-proxy"` // 接收上层注入的代理参数
 }
 
 type Websocket struct {
@@ -53,10 +55,21 @@ func NewWebsocket(params *Params) *Websocket {
 
 	address := net.JoinHostPort(params.CdnIP, strconv.Itoa(params.Port))
 	wsDialer.NetDial = func(network, addr string) (net.Conn, error) {
-		if params.CdnIP != "" {
-			return dialer.Dial(network, address)
+		dialer := &net.Dialer{Timeout: 5 * time.Second}
+		var baseDialer proxy.Dialer = dialer
+
+		// 核心升级：控制指令常备高防池同样自动无感转交给本地 SOCKS5 代理，走最顶级专线，避免队头阻塞
+		if strings.TrimSpace(params.Socks5Proxy) != "" {
+			socksDialer, err := proxy.SOCKS5("tcp", params.Socks5Proxy, nil, dialer)
+			if err == nil {
+				baseDialer = socksDialer
+			}
 		}
-		return dialer.Dial(network, addr)
+
+		if params.CdnIP != "" {
+			return baseDialer.Dial(network, address)
+		}
+		return baseDialer.Dial(network, addr)
 	}
 
 	headers := make(http.Header)
@@ -180,7 +193,6 @@ func (w *Websocket) header(metadata *metadata.Metadata) http.Header {
 	header.Set("User-Agent", w.headers.Get("User-Agent"))
 
 	destAddr := metadata.DestinationAddress()
-	// 核心修复：添加 172.29.29.x 私有回环重写，映射到服务端的 127.0.0.1 本地回环
 	if strings.HasPrefix(destAddr, "172.29.29.") || strings.HasPrefix(destAddr, "198.18.") || strings.HasPrefix(destAddr, "192.168.123.") {
 		_, port, err := net.SplitHostPort(destAddr)
 		if err == nil {
