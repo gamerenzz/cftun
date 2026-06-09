@@ -9,12 +9,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/fmnx/cftun/client/tun/dialer"
 	"github.com/fmnx/cftun/client/tun/metadata"
-	"github.com/fmnx/cftun/log"
 	"github.com/gorilla/websocket"
 	"golang.org/x/net/proxy"
 )
@@ -34,13 +32,7 @@ type Websocket struct {
 	wsDialer *websocket.Dialer
 	Url      string
 	Address  string
-
-	mu        sync.Mutex
-	connCount *atomic.Int32
-	stopChan  chan struct{}
-	connPool  chan net.Conn
-
-	interactivePool chan net.Conn
+	mu       sync.Mutex
 }
 
 func NewWebsocket(params *Params) *Websocket {
@@ -50,7 +42,7 @@ func NewWebsocket(params *Params) *Websocket {
 	wsDialer := &websocket.Dialer{
 		TLSClientConfig:   &tls.Config{ServerName: host},
 		Proxy:             http.ProxyFromEnvironment,
-		HandshakeTimeout:  6 * time.Second,
+		HandshakeTimeout:  6 * time.Second, // 宽裕的重传超时
 	}
 
 	address := net.JoinHostPort(params.CdnIP, strconv.Itoa(params.Port))
@@ -76,110 +68,22 @@ func NewWebsocket(params *Params) *Websocket {
 	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
 	ws := &Websocket{
-		params:          params,
-		wsDialer:        wsDialer,
-		headers:         headers,
-		Address:         address,
-		Url:             fmt.Sprintf("%s://%s", params.Scheme, host),
-		connCount:       &atomic.Int32{},
-		stopChan:        make(chan struct{}),
-		connPool:        make(chan net.Conn, params.PoolSize),
-		interactivePool: make(chan net.Conn, 4),
+		params:   params,
+		wsDialer: wsDialer,
+		headers:  headers,
+		Address:  address,
+		Url:      fmt.Sprintf("%s://%s", params.Scheme, host),
 	}
-
-	go ws.preWarmInteractivePool()
 	return ws
 }
 
+// ForceResetPools 在按需模式下无需任何操作，保持空接口以兼容外部路由
 func (w *Websocket) ForceResetPools() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	log.Infoln("[Failover] Evicting active connections and clearing pools for migration...")
-
-	for {
-		select {
-		case conn := <-w.connPool:
-			_ = conn.Close()
-		default:
-			goto resetInteractive
-		}
-	}
-
-resetInteractive:
-	for {
-		select {
-		case conn := <-w.interactivePool:
-			_ = conn.Close()
-		default:
-			goto rebuild
-		}
-	}
-
-rebuild:
-	w.connCount.Store(0)
-	go w.preWarmInteractivePool()
-}
-
-func (w *Websocket) preWarmInteractivePool() {
-	log.Infoln("[Optimizer] Pre-warming 4 high-speed interactive WebSocket streams to Cloudflare...")
-	for i := 0; i < 4; i++ {
-		go func() {
-			conn, err := w.connect(nil)
-			if err == nil {
-				select {
-				case w.interactivePool <- conn:
-				default:
-					_ = conn.Close()
-				}
-			}
-		}()
-	}
-}
-
-func (w *Websocket) replenishInteractive() {
-	conn, err := w.connect(nil)
-	if err == nil {
-		select {
-		case w.interactivePool <- conn:
-		default:
-			_ = conn.Close()
-		}
-	}
+	// No-op
 }
 
 func (w *Websocket) Close() {
-	close(w.stopChan)
-	for conn := range w.connPool {
-		_ = conn.Close()
-	}
-	for conn := range w.interactivePool {
-		_ = conn.Close()
-	}
-}
-
-func (w *Websocket) preDial() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.connCount.Load() >= w.params.PoolSize {
-		return
-	}
-	select {
-	case <-w.stopChan:
-		return
-	default:
-		conn, err := w.connect(nil)
-		if err != nil {
-			return
-		}
-		select {
-		case w.connPool <- conn:
-			w.connCount.Add(1)
-			return
-		default:
-			_ = conn.Close()
-		}
-	}
+	// No-op
 }
 
 func (w *Websocket) header(metadata *metadata.Metadata) http.Header {
@@ -212,46 +116,22 @@ func (w *Websocket) connect(metadata *metadata.Metadata) (net.Conn, error) {
 		if resp != nil {
 			status = resp.Status
 		}
-		log.Errorln("[Tunnel] Handshake refused by Cloudflare. Status: %s | Error: %s", status, err.Error())
-		if resp != nil && resp.Body != nil {
-			_ = resp.Body.Close()
-		}
-		return nil, err
+		return nil, fmt.Errorf("Cloudflare Handshake refused. Status: %s | Error: %w", status, err)
 	}
 
 	if resp != nil && resp.Body != nil {
 		_ = resp.Body.Close()
 	}
 
-	// 核心安全升级：完全移除客户端主动发送的 WSS Ping，防范 Cloudflare 的协议网关强制截杀
 	return dialer.NewQoSConn(&GorillaConn{Conn: wsConn}), nil
 }
 
 func (w *Websocket) Dial(metadata *metadata.Metadata) (conn net.Conn, headerSent bool, err error) {
-	defer func() { go w.preDial() }()
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
-	if metadata != nil && (metadata.Network.String() == "udp" || metadata.DstPort == 5938 || metadata.DstPort == 3389) {
-		select {
-		case conn = <-w.interactivePool:
-			go w.replenishInteractive()
-			return conn, false, nil
-		default:
-			conn, err = w.connect(metadata)
-			headerSent = true
-			return conn, headerSent, err
-		}
-	}
-
-	select {
-	case <-w.stopChan:
-		err = errors.New("websocket has been closed")
-		return
-	case conn = <-w.connPool:
-		w.connCount.Add(-1)
-		return
-	default:
-		conn, err = w.connect(metadata)
-		headerSent = true
-		return
-	}
+	// 按需实时、零额外开销建连，彻底规避空闲保活机制
+	conn, err = w.connect(metadata)
+	headerSent = true
+	return conn, headerSent, err
 }
