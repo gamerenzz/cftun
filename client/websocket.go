@@ -40,11 +40,11 @@ func NewWebsocket(config *Config, tunnel *Tunnel) *Websocket {
 		dialer := &net.Dialer{Timeout: 5 * time.Second}
 		var baseDialer proxy.Dialer = dialer
 
-		// 核心升级：如果后台配置了本地 SOCKS5 代理（Clash），主通道握手将直接无缝走专线中转
 		if strings.TrimSpace(config.Socks5Proxy) != "" {
 			socksDialer, err := proxy.SOCKS5("tcp", config.Socks5Proxy, nil, dialer)
 			if err == nil {
-				baseDialer = socksDialer
+				// 核心修复：走代理时直传域名目标 (addr)，让 Clash 在远端解析，绝杀 530 混淆与 TLS unrecognized name
+				return socksDialer.Dial(network, addr)
 			}
 		}
 
