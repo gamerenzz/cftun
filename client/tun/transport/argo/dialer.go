@@ -41,7 +41,7 @@ func NewWebsocket(params *Params) *Websocket {
 	wsDialer := &websocket.Dialer{
 		TLSClientConfig:   &tls.Config{ServerName: host},
 		Proxy:             http.ProxyFromEnvironment,
-		HandshakeTimeout:  6 * time.Second, // 宽裕的重传超时
+		HandshakeTimeout:  6 * time.Second,
 	}
 
 	address := net.JoinHostPort(params.CdnIP, strconv.Itoa(params.Port))
@@ -76,7 +76,6 @@ func NewWebsocket(params *Params) *Websocket {
 	return ws
 }
 
-// ForceResetPools 在按需模式下无需任何操作，保持空接口以兼容外部路由
 func (w *Websocket) ForceResetPools() {
 	// No-op
 }
@@ -122,14 +121,19 @@ func (w *Websocket) connect(metadata *metadata.Metadata) (net.Conn, error) {
 		_ = resp.Body.Close()
 	}
 
-	return dialer.NewQoSConn(&GorillaConn{Conn: wsConn}), nil
+	isUDP := false
+	if metadata != nil && metadata.Network.String() == "udp" {
+		isUDP = true
+	}
+
+	// 将当前连接是否为 UDP 流量的状态标识强行注入，作为双发判断条件
+	return dialer.NewQoSConn(&GorillaConn{Conn: wsConn}, isUDP), nil
 }
 
 func (w *Websocket) Dial(metadata *metadata.Metadata) (conn net.Conn, headerSent bool, err error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	// 按需实时、零额外开销建连，彻底规避空闲保活机制
 	conn, err = w.connect(metadata)
 	headerSent = true
 	return conn, headerSent, err
